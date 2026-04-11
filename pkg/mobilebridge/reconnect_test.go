@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 // TestProxyReconnect_BackoffSequence drives (*Proxy).reconnect through a
@@ -151,4 +153,69 @@ func TestProxyReconnect_GivesUp(t *testing.T) {
 	if got := atomic.LoadInt32(&hits); int(got) != len(reconnectBackoff) {
 		t.Errorf("hit count = %d, want %d (one per backoff tick)", got, len(reconnectBackoff))
 	}
+}
+
+// TestProxyReconnect_ReaderResumes verifies that when reconnect() swaps in a
+// fresh upstream, the Serve reader goroutine picks up the new connection
+// instead of staying blocked on the old (closed) one. The bug before M2 was
+// that the reader held a snapshot of the original p.upstream and never saw
+// the swap.
+func TestProxyReconnect_ReaderResumes(t *testing.T) {
+	origBackoff := reconnectBackoff
+	reconnectBackoff = []time.Duration{1 * time.Millisecond}
+	t.Cleanup(func() { reconnectBackoff = origBackoff })
+
+	origRunner := commandRunner
+	commandRunner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		return nil, nil
+	}
+	t.Cleanup(func() { commandRunner = origRunner })
+
+	// Upstream #2 is what reconnect() dials after we kill #1.
+	up2 := newUpstreamRecorder()
+	defer up2.Close()
+
+	// /json/version hands out up2's WS URL so reconnect lands on it.
+	jsonSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"Browser":"Chrome/stub","webSocketDebuggerUrl":%q}`, up2.WSURL())
+	}))
+	defer jsonSrv.Close()
+	_, portStr, _ := net.SplitHostPort(strings.TrimPrefix(jsonSrv.URL, "http://"))
+	var port int
+	fmt.Sscanf(portStr, "%d", &port)
+
+	// Upstream #1: the initial connection the Proxy holds.
+	up1 := newUpstreamRecorder()
+	defer up1.Close()
+	conn1, _, err := websocket.DefaultDialer.Dial(up1.WSURL(), nil)
+	if err != nil {
+		t.Fatalf("dial up1: %v", err)
+	}
+
+	p := &Proxy{
+		serial:     "STUB",
+		localPort:  port,
+		remoteSock: "chrome_devtools_remote",
+		upstream:   conn1,
+		closed:     make(chan struct{}),
+	}
+	p.registerDefaultMethodHandlers()
+
+	// Trigger a reconnect: this closes conn1 (old upstream) and dials a
+	// fresh one against up2 via /json/version.
+	if err := p.reconnect(); err != nil {
+		t.Fatalf("reconnect: %v", err)
+	}
+	p.upstreamMu.RLock()
+	newConn := p.upstream
+	p.upstreamMu.RUnlock()
+	if newConn == nil || newConn == conn1 {
+		t.Fatalf("upstream was not swapped: new=%p old=%p", newConn, conn1)
+	}
+	// Sanity: the new conn is a real WS connection we can write to.
+	if err := newConn.WriteMessage(websocket.TextMessage, []byte(`{"id":1,"method":"ping"}`)); err != nil {
+		t.Fatalf("write on new upstream: %v", err)
+	}
+	_ = p.Close()
 }

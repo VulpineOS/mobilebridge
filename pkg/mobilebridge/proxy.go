@@ -41,7 +41,19 @@ type Proxy struct {
 	localPort  int
 	remoteSock string
 
-	upstream *websocket.Conn
+	// upstreamMu guards reads/writes of the upstream pointer itself. Held
+	// for the duration of reconnect()'s swap so the reader goroutine never
+	// observes a half-updated value. Read-locked by Upstream() accessors.
+	upstreamMu sync.RWMutex
+	upstream   *websocket.Conn
+
+	// reconnectGate is signaled when a reconnect finishes (success or
+	// failure). The upstream->downstream reader blocks on this when its
+	// ReadMessage returns an error while a reconnect is in progress, so it
+	// can pick up the new p.upstream without racing the swap. Nil when no
+	// reconnect is pending; always recreated under upstreamMu.
+	reconnectGate chan struct{}
+	reconnectErr  error
 
 	// writeMu serializes writes on the upstream connection. Gesture helpers
 	// and the downstream->upstream pump both use it.
@@ -245,10 +257,13 @@ func (p *Proxy) sendUpstream(method string, params any) error {
 	}
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
-	if p.upstream == nil {
+	p.upstreamMu.RLock()
+	conn := p.upstream
+	p.upstreamMu.RUnlock()
+	if conn == nil {
 		return errors.New("mobilebridge: proxy not connected")
 	}
-	return p.upstream.WriteMessage(websocket.TextMessage, b)
+	return conn.WriteMessage(websocket.TextMessage, b)
 }
 
 // Serve pumps frames in both directions until either side hangs up. Only
@@ -302,10 +317,7 @@ func (p *Proxy) Serve(downstream *websocket.Conn) error {
 				}
 				continue
 			}
-			p.writeMu.Lock()
-			werr := p.upstream.WriteMessage(websocket.TextMessage, data)
-			p.writeMu.Unlock()
-			if werr != nil {
+			if werr := p.writeUpstream(data); werr != nil {
 				// Upstream died mid-write — most commonly because the
 				// adb forward dropped. Try to re-establish; if that
 				// succeeds, replay this frame on the new connection.
@@ -313,10 +325,7 @@ func (p *Proxy) Serve(downstream *websocket.Conn) error {
 					errCh <- werr
 					return
 				}
-				p.writeMu.Lock()
-				werr = p.upstream.WriteMessage(websocket.TextMessage, data)
-				p.writeMu.Unlock()
-				if werr != nil {
+				if werr := p.writeUpstream(data); werr != nil {
 					errCh <- werr
 					return
 				}
@@ -324,11 +333,40 @@ func (p *Proxy) Serve(downstream *websocket.Conn) error {
 		}
 	}()
 
-	// Upstream -> downstream.
+	// Upstream -> downstream. When the upstream read fails we check for an
+	// in-flight reconnect; if one is in progress we wait for it and pick up
+	// the new connection instead of tearing the whole Serve loop down.
 	go func() {
 		for {
-			mt, data, err := p.upstream.ReadMessage()
+			p.upstreamMu.RLock()
+			conn := p.upstream
+			gate := p.reconnectGate
+			p.upstreamMu.RUnlock()
+			if conn == nil {
+				if gate != nil {
+					<-gate
+					continue
+				}
+				errCh <- errors.New("mobilebridge: upstream nil and no reconnect in progress")
+				return
+			}
+			mt, data, err := conn.ReadMessage()
 			if err != nil {
+				// Was this because reconnect() closed the conn under us?
+				p.upstreamMu.RLock()
+				gate := p.reconnectGate
+				p.upstreamMu.RUnlock()
+				if gate != nil {
+					<-gate
+					p.upstreamMu.RLock()
+					rerr := p.reconnectErr
+					p.upstreamMu.RUnlock()
+					if rerr != nil {
+						errCh <- err
+						return
+					}
+					continue
+				}
 				errCh <- err
 				return
 			}
@@ -428,8 +466,12 @@ func (p *Proxy) Close() error {
 	var err error
 	p.closeOnce.Do(func() {
 		close(p.closed)
-		if p.upstream != nil {
-			err = p.upstream.Close()
+		p.upstreamMu.Lock()
+		conn := p.upstream
+		p.upstream = nil
+		p.upstreamMu.Unlock()
+		if conn != nil {
+			err = conn.Close()
 		}
 		if p.serial != "" && p.localPort != 0 {
 			if uerr := Unforward(p.serial, p.localPort); uerr != nil && err == nil {
@@ -449,16 +491,44 @@ var reconnectBackoff = []time.Duration{
 	3 * time.Second,
 }
 
+// writeUpstream serializes a raw text frame write to the upstream WebSocket
+// under writeMu, safely reading p.upstream under upstreamMu.
+func (p *Proxy) writeUpstream(data []byte) error {
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+	p.upstreamMu.RLock()
+	conn := p.upstream
+	p.upstreamMu.RUnlock()
+	if conn == nil {
+		return errors.New("mobilebridge: upstream nil")
+	}
+	return conn.WriteMessage(websocket.TextMessage, data)
+}
+
 // reconnect tears down the current upstream connection and tries to
 // re-establish the adb forward + Chrome WebSocket with an escalating
 // backoff. Used by Serve() when a write to upstream fails — the most
 // common cause is the adb forward dropping (cable jiggle, adb server
 // restart, device sleep). Returns the final error if all attempts fail.
+//
+// While reconnect runs, p.reconnectGate is non-nil and the reader goroutine
+// in Serve() will block on it after observing its ReadMessage error, so the
+// reader resumes on the new connection once the swap succeeds.
 func (p *Proxy) reconnect() error {
-	if p.upstream != nil {
-		_ = p.upstream.Close()
-		p.upstream = nil
+	// Open the gate so the reader knows to wait for us instead of tearing
+	// the whole Serve loop down. Close the old conn to unblock any
+	// in-flight ReadMessage.
+	gate := make(chan struct{})
+	p.upstreamMu.Lock()
+	p.reconnectGate = gate
+	p.reconnectErr = nil
+	old := p.upstream
+	p.upstream = nil
+	p.upstreamMu.Unlock()
+	if old != nil {
+		_ = old.Close()
 	}
+
 	var lastErr error
 	for _, delay := range reconnectBackoff {
 		time.Sleep(delay)
@@ -479,20 +549,31 @@ func (p *Proxy) reconnect() error {
 			lastErr = fmt.Errorf("dial upstream: %w", err)
 			continue
 		}
-		p.writeMu.Lock()
+		p.upstreamMu.Lock()
 		p.upstream = conn
-		p.writeMu.Unlock()
+		p.reconnectGate = nil
+		p.upstreamMu.Unlock()
+		close(gate)
 		return nil
 	}
 	if lastErr == nil {
 		lastErr = errors.New("mobilebridge: reconnect gave up")
 	}
+	p.upstreamMu.Lock()
+	p.reconnectGate = nil
+	p.reconnectErr = lastErr
+	p.upstreamMu.Unlock()
+	close(gate)
 	return lastErr
 }
 
 // Upstream exposes the underlying connection for advanced callers. It is not
 // safe for concurrent writes; use sendUpstream instead.
-func (p *Proxy) Upstream() *websocket.Conn { return p.upstream }
+func (p *Proxy) Upstream() *websocket.Conn {
+	p.upstreamMu.RLock()
+	defer p.upstreamMu.RUnlock()
+	return p.upstream
+}
 
 // Busy reports whether a client is currently attached via Serve. Used by
 // HTTP handlers to reject a second connection with 503 before upgrading.
