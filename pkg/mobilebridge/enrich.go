@@ -3,6 +3,7 @@ package mobilebridge
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -39,8 +40,13 @@ func (d *Device) Enrich(ctx context.Context) error {
 	// Android version (e.g. "14").
 	if out, err := commandRunner(ctx, adbPath, "-s", d.Serial, "shell",
 		"getprop", "ro.build.version.release"); err == nil {
-		d.AndroidVersion = strings.TrimSpace(string(out))
-		okAny = true
+		raw := strings.TrimSpace(string(out))
+		if raw != "" {
+			d.AndroidVersion = raw
+			okAny = true
+		} else {
+			record(errors.New("parse android version: empty getprop output"))
+		}
 	} else {
 		record(err)
 	}
@@ -48,9 +54,12 @@ func (d *Device) Enrich(ctx context.Context) error {
 	// SDK level (e.g. "34").
 	if out, err := commandRunner(ctx, adbPath, "-s", d.Serial, "shell",
 		"getprop", "ro.build.version.sdk"); err == nil {
-		if n, perr := strconv.Atoi(strings.TrimSpace(string(out))); perr == nil {
+		raw := strings.TrimSpace(string(out))
+		if n, perr := strconv.Atoi(raw); perr == nil {
 			d.SDKLevel = n
 			okAny = true
+		} else {
+			record(fmt.Errorf("parse sdk level %q: %w", raw, perr))
 		}
 	} else {
 		record(err)
@@ -62,6 +71,8 @@ func (d *Device) Enrich(ctx context.Context) error {
 		d.RAM_MB = parseMemTotalMB(string(out))
 		if d.RAM_MB > 0 {
 			okAny = true
+		} else {
+			record(errors.New("parse meminfo: no MemTotal line"))
 		}
 	} else {
 		record(err)
@@ -73,6 +84,8 @@ func (d *Device) Enrich(ctx context.Context) error {
 		if pct, ok := parseBatteryLevel(string(out)); ok {
 			d.BatteryPercent = pct
 			okAny = true
+		} else {
+			record(errors.New("parse dumpsys battery: no level line"))
 		}
 	} else {
 		record(err)
