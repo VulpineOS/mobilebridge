@@ -37,6 +37,10 @@ var commandRunner = func(ctx context.Context, name string, args ...string) ([]by
 // adbPath is the executable used for ADB calls. Tests may override it.
 var adbPath = "adb"
 
+// adbLookupFn resolves the adb binary on PATH. Overridable from tests that
+// stub commandRunner and don't want a real adb install on the test host.
+var adbLookupFn = exec.LookPath
+
 func runADB(ctx context.Context, args ...string) ([]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -44,8 +48,13 @@ func runADB(ctx context.Context, args ...string) ([]byte, error) {
 	return commandRunner(ctx, adbPath, args...)
 }
 
-// ListDevices runs `adb devices -l` and parses the result.
+// ListDevices runs `adb devices -l` and parses the result. If the adb
+// executable isn't on PATH it returns an error wrapping ErrADBMissing so
+// callers can errors.Is-check the common operator mistake.
 func ListDevices(ctx context.Context) ([]Device, error) {
+	if _, lookErr := adbLookupFn(adbPath); lookErr != nil {
+		return nil, fmt.Errorf("%w: %v", ErrADBMissing, lookErr)
+	}
 	out, err := runADB(ctx, "devices", "-l")
 	if err != nil {
 		return nil, fmt.Errorf("adb devices: %w: %s", err, string(out))
@@ -186,7 +195,7 @@ func ChromeDevtoolsSocketInfo(ctx context.Context, serial string) (DevtoolsSocke
 	}
 	name, ok := parseDevtoolsSocket(string(out))
 	if !ok {
-		return DevtoolsSocket{}, errors.New("mobilebridge: no chrome devtools socket found on device")
+		return DevtoolsSocket{}, ErrNoDevtoolsSocket
 	}
 	kind := SocketKindUnknown
 	switch {

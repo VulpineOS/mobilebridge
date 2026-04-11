@@ -204,3 +204,42 @@ func TestChromeDevtoolsSocketInfoWebView(t *testing.T) {
 		t.Errorf("name = %q", info.Name)
 	}
 }
+
+// TestSentinelErrors exercises the exported error sentinels so callers can
+// use errors.Is to match failure modes without parsing error strings.
+func TestSentinelErrors(t *testing.T) {
+	// ErrADBMissing: stub adbLookupFn so we don't need a real missing adb.
+	origLookup := adbLookupFn
+	adbLookupFn = func(string) (string, error) { return "", errors.New("exec: not found") }
+	t.Cleanup(func() { adbLookupFn = origLookup })
+
+	_, err := ListDevices(context.Background())
+	if err == nil {
+		t.Fatal("want error, got nil")
+	}
+	if !errors.Is(err, ErrADBMissing) {
+		t.Errorf("errors.Is(err, ErrADBMissing) = false; err = %v", err)
+	}
+
+	// Restore lookup for the devtools socket test.
+	adbLookupFn = origLookup
+
+	// ErrNoDevtoolsSocket: /proc/net/unix with no matching line.
+	withStubRunner(t, sampleProcNetUnixNone, nil)
+	_, err = ChromeDevtoolsSocketInfo(context.Background(), "R58N")
+	if err == nil {
+		t.Fatal("want error, got nil")
+	}
+	if !errors.Is(err, ErrNoDevtoolsSocket) {
+		t.Errorf("errors.Is(err, ErrNoDevtoolsSocket) = false; err = %v", err)
+	}
+
+	// ErrDeviceNotFound: sanity-check the sentinel is unique and non-nil so
+	// downstream callers can rely on it existing in this package.
+	if ErrDeviceNotFound == nil {
+		t.Error("ErrDeviceNotFound is nil")
+	}
+	if errors.Is(ErrDeviceNotFound, ErrADBMissing) || errors.Is(ErrADBMissing, ErrNoDevtoolsSocket) {
+		t.Error("sentinel errors must be distinct")
+	}
+}
