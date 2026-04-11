@@ -25,7 +25,19 @@ type Server struct {
 	mu       sync.Mutex
 	httpSrv  *http.Server
 	upgrader websocket.Upgrader
+
+	// listCacheMu guards a short-lived /json/list response cache. Chrome
+	// devtools clients poll this endpoint aggressively, so we coalesce
+	// upstream GETs to one per jsonListCacheTTL window.
+	listCacheMu  sync.Mutex
+	listCacheBuf []byte
+	listCacheAt  time.Time
 }
+
+// jsonListCacheTTL is how long /json/list responses are cached. Short enough
+// that a newly-opened tab shows up within one poll interval, long enough to
+// soak a burst of concurrent polls down to a single upstream request.
+const jsonListCacheTTL = 500 * time.Millisecond
 
 // NewServer constructs a Server bound to addr (e.g. "127.0.0.1:9222") that
 // will proxy CDP traffic to the named device.
@@ -193,9 +205,31 @@ func (s *Server) RunWithProxy(p *Proxy) error {
 		}
 	}
 
+	// /json/list is cached for jsonListCacheTTL to coalesce polling clients.
+	listHandler := forwardJSON("/json/list")
+	cachedList := func(w http.ResponseWriter, r *http.Request) {
+		s.listCacheMu.Lock()
+		if time.Since(s.listCacheAt) < jsonListCacheTTL && s.listCacheBuf != nil {
+			body := s.listCacheBuf
+			s.listCacheMu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(body)
+			return
+		}
+		s.listCacheMu.Unlock()
+		rec := &cachingResponseWriter{ResponseWriter: w}
+		listHandler(rec, r)
+		if rec.status == 0 || rec.status == http.StatusOK {
+			s.listCacheMu.Lock()
+			s.listCacheBuf = rec.buf
+			s.listCacheAt = time.Now()
+			s.listCacheMu.Unlock()
+		}
+	}
+
 	mux.HandleFunc("/json/version", forwardJSON("/json/version"))
-	mux.HandleFunc("/json/list", forwardJSON("/json/list"))
-	mux.HandleFunc("/json", forwardJSON("/json"))
+	mux.HandleFunc("/json/list", cachedList)
+	mux.HandleFunc("/json", cachedList)
 	mux.HandleFunc("/json/new", forwardJSON("/json/new"))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "ok")
@@ -223,6 +257,25 @@ func (s *Server) RunWithProxy(p *Proxy) error {
 
 	srv.Handler = mux
 	return nil
+}
+
+// cachingResponseWriter is a thin http.ResponseWriter wrapper that buffers
+// the body and captures the status code so a successful /json/list reply
+// can be cached for jsonListCacheTTL.
+type cachingResponseWriter struct {
+	http.ResponseWriter
+	status int
+	buf    []byte
+}
+
+func (c *cachingResponseWriter) WriteHeader(code int) {
+	c.status = code
+	c.ResponseWriter.WriteHeader(code)
+}
+
+func (c *cachingResponseWriter) Write(b []byte) (int, error) {
+	c.buf = append(c.buf, b...)
+	return c.ResponseWriter.Write(b)
 }
 
 // rewriteDevtoolsJSON takes a raw /json/version or /json/list body from the
