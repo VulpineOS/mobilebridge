@@ -114,27 +114,10 @@ func runBridge(device string, port int, autoRestart bool, screenRecord string, l
 			go runLogcat(serial)
 		}
 
-		// Wait for either a signal (exit) or the upstream dying (auto-restart).
-		upstreamGone := make(chan struct{})
-		go func() {
-			ws := proxy.Upstream()
-			if ws == nil {
-				close(upstreamGone)
-				return
-			}
-			// Block on Ping loop: reuse ReadMessage by polling CloseHandler
-			// indirectly — a simple poll is enough since we only care about
-			// "is the socket still alive".
-			t := time.NewTicker(2 * time.Second)
-			defer t.Stop()
-			for range t.C {
-				if proxy.Upstream() == nil {
-					close(upstreamGone)
-					return
-				}
-			}
-		}()
-
+		// Wait for either a signal (exit) or the proxy giving up on
+		// reconnects. proxy.Done() is closed by Close() or when
+		// reconnect() exhausts its backoff schedule — that's the one
+		// signal we care about here, no polling required.
 		select {
 		case <-sigCh:
 			log.Printf("shutting down")
@@ -150,7 +133,7 @@ func runBridge(device string, port int, autoRestart bool, screenRecord string, l
 			_ = srv.Stop()
 			_ = proxy.Close()
 			return
-		case <-upstreamGone:
+		case <-proxy.Done():
 			_ = srv.Stop()
 			_ = proxy.Close()
 			if !autoRestart {

@@ -155,6 +155,54 @@ func TestProxyReconnect_GivesUp(t *testing.T) {
 	}
 }
 
+// TestProxyDoneClosedAfterReconnectGivesUp forces reconnect to fail every
+// attempt and asserts the proxy's Done() channel is closed so CLI callers
+// can notice the permanent loss without polling Upstream().
+func TestProxyDoneClosedAfterReconnectGivesUp(t *testing.T) {
+	origBackoff := reconnectBackoff
+	reconnectBackoff = []time.Duration{
+		1 * time.Millisecond,
+		1 * time.Millisecond,
+		1 * time.Millisecond,
+		1 * time.Millisecond,
+	}
+	t.Cleanup(func() { reconnectBackoff = origBackoff })
+
+	origRunner := commandRunner
+	commandRunner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		return nil, nil
+	}
+	t.Cleanup(func() { commandRunner = origRunner })
+
+	// /json/version always 503s so Dial never succeeds.
+	jsonSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer jsonSrv.Close()
+	_, portStr, _ := net.SplitHostPort(strings.TrimPrefix(jsonSrv.URL, "http://"))
+	var port int
+	fmt.Sscanf(portStr, "%d", &port)
+
+	p := &Proxy{
+		serial:     "STUB",
+		localPort:  port,
+		remoteSock: "chrome_devtools_remote",
+		closed:     make(chan struct{}),
+	}
+	// Prime Done() before reconnect so we exercise the lazy-init path.
+	done := p.Done()
+
+	if err := p.reconnect(); err == nil {
+		t.Fatal("expected reconnect to give up, got nil")
+	}
+	select {
+	case <-done:
+		// expected
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Done() channel not closed after reconnect gave up")
+	}
+}
+
 // TestProxyReconnect_ReaderResumes verifies that when reconnect() swaps in a
 // fresh upstream, the Serve reader goroutine picks up the new connection
 // instead of staying blocked on the old (closed) one. The bug before M2 was

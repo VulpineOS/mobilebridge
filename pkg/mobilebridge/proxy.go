@@ -82,6 +82,13 @@ type Proxy struct {
 
 	closeOnce sync.Once
 	closed    chan struct{}
+
+	// doneOnce + done combine into a one-shot signal that the proxy can no
+	// longer recover. It is closed either by Close() or by reconnect() when
+	// the backoff schedule is exhausted. Consumers select on Done() to
+	// notice upstream loss without polling Upstream().
+	doneOnce sync.Once
+	done     chan struct{}
 }
 
 // ErrBusy is returned by Proxy.Serve if a second client tries to attach
@@ -123,6 +130,7 @@ func NewProxy(ctx context.Context, serial string, localPort int) (*Proxy, error)
 		remoteSock: sock,
 		upstream:   conn,
 		closed:     make(chan struct{}),
+		done:       make(chan struct{}),
 	}
 	p.registerDefaultMethodHandlers()
 	return p, nil
@@ -480,11 +488,37 @@ func (p *Proxy) maybeHandleSynthetic(raw []byte) (bool, []byte) {
 	return true, b
 }
 
+// Done returns a channel that is closed when the proxy can no longer serve
+// traffic — either because Close was called or because reconnect() gave up
+// after exhausting the backoff schedule. CLI callers select on this to
+// notice upstream loss without polling Upstream().
+func (p *Proxy) Done() <-chan struct{} {
+	p.upstreamMu.Lock()
+	if p.done == nil {
+		p.done = make(chan struct{})
+	}
+	ch := p.done
+	p.upstreamMu.Unlock()
+	return ch
+}
+
+// signalDone closes the Done() channel at most once.
+func (p *Proxy) signalDone() {
+	p.upstreamMu.Lock()
+	if p.done == nil {
+		p.done = make(chan struct{})
+	}
+	ch := p.done
+	p.upstreamMu.Unlock()
+	p.doneOnce.Do(func() { close(ch) })
+}
+
 // Close tears down the upstream WebSocket and removes the adb forward.
 func (p *Proxy) Close() error {
 	var err error
 	p.closeOnce.Do(func() {
 		close(p.closed)
+		p.signalDone()
 		p.upstreamMu.Lock()
 		conn := p.upstream
 		p.upstream = nil
@@ -583,6 +617,8 @@ func (p *Proxy) reconnect() error {
 	p.reconnectErr = lastErr
 	p.upstreamMu.Unlock()
 	close(gate)
+	// Signal permanent loss so consumers selecting on Done() can react.
+	p.signalDone()
 	return lastErr
 }
 
