@@ -191,8 +191,20 @@ func (p *Proxy) Serve(downstream *websocket.Conn) error {
 			werr := p.upstream.WriteMessage(websocket.TextMessage, data)
 			p.writeMu.Unlock()
 			if werr != nil {
-				errCh <- werr
-				return
+				// Upstream died mid-write — most commonly because the
+				// adb forward dropped. Try to re-establish; if that
+				// succeeds, replay this frame on the new connection.
+				if rerr := p.reconnect(); rerr != nil {
+					errCh <- werr
+					return
+				}
+				p.writeMu.Lock()
+				werr = p.upstream.WriteMessage(websocket.TextMessage, data)
+				p.writeMu.Unlock()
+				if werr != nil {
+					errCh <- werr
+					return
+				}
 			}
 		}
 	}()
@@ -286,6 +298,56 @@ func (p *Proxy) Close() error {
 		}
 	})
 	return err
+}
+
+// reconnectBackoff is the escalating delay sequence for reconnect attempts.
+// Overridable from tests.
+var reconnectBackoff = []time.Duration{
+	100 * time.Millisecond,
+	300 * time.Millisecond,
+	1 * time.Second,
+	3 * time.Second,
+}
+
+// reconnect tears down the current upstream connection and tries to
+// re-establish the adb forward + Chrome WebSocket with an escalating
+// backoff. Used by Serve() when a write to upstream fails — the most
+// common cause is the adb forward dropping (cable jiggle, adb server
+// restart, device sleep). Returns the final error if all attempts fail.
+func (p *Proxy) reconnect() error {
+	if p.upstream != nil {
+		_ = p.upstream.Close()
+		p.upstream = nil
+	}
+	var lastErr error
+	for _, delay := range reconnectBackoff {
+		time.Sleep(delay)
+		// Best-effort: re-run adb forward in case the forward was torn
+		// down underneath us.
+		if err := Forward(p.serial, p.localPort, p.remoteSock); err != nil {
+			lastErr = fmt.Errorf("adb forward: %w", err)
+			continue
+		}
+		wsURL, err := fetchBrowserWebSocketURL(fmt.Sprintf("http://127.0.0.1:%d", p.localPort))
+		if err != nil {
+			lastErr = fmt.Errorf("fetch browser ws url: %w", err)
+			continue
+		}
+		dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+		conn, _, err := dialer.Dial(wsURL, nil)
+		if err != nil {
+			lastErr = fmt.Errorf("dial upstream: %w", err)
+			continue
+		}
+		p.writeMu.Lock()
+		p.upstream = conn
+		p.writeMu.Unlock()
+		return nil
+	}
+	if lastErr == nil {
+		lastErr = errors.New("mobilebridge: reconnect gave up")
+	}
+	return lastErr
 }
 
 // Upstream exposes the underlying connection for advanced callers. It is not
