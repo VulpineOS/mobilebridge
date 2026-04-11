@@ -41,6 +41,15 @@ type Proxy struct {
 	serveMu sync.Mutex
 	busy    bool
 
+	// methodHandlers maps synthetic CDP method names (e.g. "MobileBridge.tap")
+	// to handler functions. Handlers receive the raw "params" JSON and return
+	// an arbitrary result value which the Proxy wraps into a CDP response.
+	// The map is populated by registerDefaultMethodHandlers in NewProxy and
+	// may also be extended via RegisterMethod for tests or callers embedding
+	// the Proxy directly.
+	methodMu       sync.RWMutex
+	methodHandlers map[string]func(params json.RawMessage) (interface{}, error)
+
 	closeOnce sync.Once
 	closed    chan struct{}
 }
@@ -75,13 +84,97 @@ func NewProxy(serial string, localPort int) (*Proxy, error) {
 		return nil, fmt.Errorf("dial upstream: %w", err)
 	}
 
-	return &Proxy{
+	p := &Proxy{
 		serial:     serial,
 		localPort:  localPort,
 		remoteSock: sock,
 		upstream:   conn,
 		closed:     make(chan struct{}),
-	}, nil
+	}
+	p.registerDefaultMethodHandlers()
+	return p, nil
+}
+
+// RegisterMethod installs a synthetic CDP method handler. If a handler with
+// the same name already exists it is replaced. Handlers are called from the
+// downstream read goroutine, so they should return quickly; long-running work
+// should be dispatched to its own goroutine.
+func (p *Proxy) RegisterMethod(name string, fn func(params json.RawMessage) (interface{}, error)) {
+	p.methodMu.Lock()
+	defer p.methodMu.Unlock()
+	if p.methodHandlers == nil {
+		p.methodHandlers = make(map[string]func(params json.RawMessage) (interface{}, error))
+	}
+	p.methodHandlers[name] = fn
+}
+
+// lookupMethod returns the handler for name if one is registered.
+func (p *Proxy) lookupMethod(name string) (func(params json.RawMessage) (interface{}, error), bool) {
+	p.methodMu.RLock()
+	defer p.methodMu.RUnlock()
+	fn, ok := p.methodHandlers[name]
+	return fn, ok
+}
+
+// registerDefaultMethodHandlers wires the built-in MobileBridge.* gesture
+// methods into methodHandlers. Called from NewProxy and also from tests that
+// construct a bare Proxy{}.
+func (p *Proxy) registerDefaultMethodHandlers() {
+	p.RegisterMethod("MobileBridge.tap", func(params json.RawMessage) (interface{}, error) {
+		var args struct{ X, Y int }
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &args); err != nil {
+				return nil, err
+			}
+		}
+		if err := Tap(p, args.X, args.Y); err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{}, nil
+	})
+	p.RegisterMethod("MobileBridge.longPress", func(params json.RawMessage) (interface{}, error) {
+		var args struct {
+			X, Y, DurationMs int
+		}
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &args); err != nil {
+				return nil, err
+			}
+		}
+		if err := LongPress(p, args.X, args.Y, args.DurationMs); err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{}, nil
+	})
+	p.RegisterMethod("MobileBridge.swipe", func(params json.RawMessage) (interface{}, error) {
+		var args struct {
+			FromX, FromY, ToX, ToY, DurationMs int
+		}
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &args); err != nil {
+				return nil, err
+			}
+		}
+		if err := Swipe(p, args.FromX, args.FromY, args.ToX, args.ToY, args.DurationMs); err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{}, nil
+	})
+	p.RegisterMethod("MobileBridge.pinch", func(params json.RawMessage) (interface{}, error) {
+		var args struct {
+			CenterX, CenterY int
+			Scale            float64
+		}
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &args); err != nil {
+				return nil, err
+			}
+		}
+		if err := Pinch(p, args.CenterX, args.CenterY, args.Scale); err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{}, nil
+	})
 }
 
 // browserVersionInfo is the subset of /json/version we care about.
@@ -168,6 +261,15 @@ func (p *Proxy) Serve(downstream *websocket.Conn) error {
 	}()
 	errCh := make(chan error, 2)
 
+	// downstreamWriteMu serializes writes on the downstream connection.
+	// Synthetic responses and the upstream->downstream pump both use it.
+	var downstreamWriteMu sync.Mutex
+	writeDownstream := func(mt int, b []byte) error {
+		downstreamWriteMu.Lock()
+		defer downstreamWriteMu.Unlock()
+		return downstream.WriteMessage(mt, b)
+	}
+
 	// Downstream -> upstream. Intercept synthetic MobileBridge.* methods
 	// and translate them into real CDP calls; forward everything else.
 	go func() {
@@ -180,10 +282,12 @@ func (p *Proxy) Serve(downstream *websocket.Conn) error {
 			if mt != websocket.TextMessage {
 				continue
 			}
-			if handled, herr := p.maybeHandleSynthetic(data); handled {
-				if herr != nil {
-					errCh <- herr
-					return
+			if handled, resp := p.maybeHandleSynthetic(data); handled {
+				if resp != nil {
+					if werr := writeDownstream(websocket.TextMessage, resp); werr != nil {
+						errCh <- werr
+						return
+					}
 				}
 				continue
 			}
@@ -217,7 +321,7 @@ func (p *Proxy) Serve(downstream *websocket.Conn) error {
 				errCh <- err
 				return
 			}
-			if err := downstream.WriteMessage(mt, data); err != nil {
+			if err := writeDownstream(mt, data); err != nil {
 				errCh <- err
 				return
 			}
@@ -232,10 +336,25 @@ func (p *Proxy) Serve(downstream *websocket.Conn) error {
 	}
 }
 
-// maybeHandleSynthetic peeks at an incoming CDP message and, if it names a
-// MobileBridge.* gesture method, dispatches it via the gesture helpers.
-// Returns handled=true if the message was consumed (regardless of error).
-func (p *Proxy) maybeHandleSynthetic(raw []byte) (bool, error) {
+// cdpResponse is the JSON wire format for a CDP method reply. Either Result
+// or Error is set, matching the shape real Chrome uses.
+type cdpResponse struct {
+	ID     int64           `json:"id"`
+	Result interface{}     `json:"result,omitempty"`
+	Error  *cdpErrorObject `json:"error,omitempty"`
+}
+
+type cdpErrorObject struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+// maybeHandleSynthetic peeks at an incoming CDP message. If the method name
+// is registered in methodHandlers the handler is invoked and a CDP response
+// is encoded for the caller to write back to the downstream client. Returns
+// handled=true whenever the message was consumed; the upstream is never told
+// about synthetic methods.
+func (p *Proxy) maybeHandleSynthetic(raw []byte) (bool, []byte) {
 	var probe struct {
 		ID     int64           `json:"id"`
 		Method string          `json:"method"`
@@ -244,43 +363,47 @@ func (p *Proxy) maybeHandleSynthetic(raw []byte) (bool, error) {
 	if err := json.Unmarshal(raw, &probe); err != nil {
 		return false, nil
 	}
-	if !strings.HasPrefix(probe.Method, "MobileBridge.") {
+	if probe.Method == "" {
 		return false, nil
 	}
-	switch probe.Method {
-	case "MobileBridge.tap":
-		var args struct{ X, Y int }
-		if err := json.Unmarshal(probe.Params, &args); err != nil {
-			return true, err
+	handler, ok := p.lookupMethod(probe.Method)
+	if !ok {
+		// Not a synthetic method — forward to upstream as usual. We still
+		// treat MobileBridge.* without a handler as handled-with-error so
+		// the caller gets a proper CDP error instead of a real Chrome
+		// "method not found" for a method Chrome doesn't know either.
+		if strings.HasPrefix(probe.Method, "MobileBridge.") {
+			resp := cdpResponse{
+				ID: probe.ID,
+				Error: &cdpErrorObject{
+					Code:    -32601,
+					Message: fmt.Sprintf("mobilebridge: unknown synthetic method %q", probe.Method),
+				},
+			}
+			b, _ := json.Marshal(resp)
+			return true, b
 		}
-		return true, Tap(p, args.X, args.Y)
-	case "MobileBridge.longPress":
-		var args struct {
-			X, Y, DurationMs int
-		}
-		if err := json.Unmarshal(probe.Params, &args); err != nil {
-			return true, err
-		}
-		return true, LongPress(p, args.X, args.Y, args.DurationMs)
-	case "MobileBridge.swipe":
-		var args struct {
-			FromX, FromY, ToX, ToY, DurationMs int
-		}
-		if err := json.Unmarshal(probe.Params, &args); err != nil {
-			return true, err
-		}
-		return true, Swipe(p, args.FromX, args.FromY, args.ToX, args.ToY, args.DurationMs)
-	case "MobileBridge.pinch":
-		var args struct {
-			CenterX, CenterY int
-			Scale            float64
-		}
-		if err := json.Unmarshal(probe.Params, &args); err != nil {
-			return true, err
-		}
-		return true, Pinch(p, args.CenterX, args.CenterY, args.Scale)
+		return false, nil
 	}
-	return true, fmt.Errorf("mobilebridge: unknown synthetic method %q", probe.Method)
+
+	result, err := handler(probe.Params)
+	if err != nil {
+		resp := cdpResponse{
+			ID: probe.ID,
+			Error: &cdpErrorObject{
+				Code:    -32000,
+				Message: err.Error(),
+			},
+		}
+		b, _ := json.Marshal(resp)
+		return true, b
+	}
+	if result == nil {
+		result = map[string]interface{}{}
+	}
+	resp := cdpResponse{ID: probe.ID, Result: result}
+	b, _ := json.Marshal(resp)
+	return true, b
 }
 
 // Close tears down the upstream WebSocket and removes the adb forward.
