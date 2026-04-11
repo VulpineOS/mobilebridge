@@ -148,6 +148,16 @@ func (s *Server) RunWithProxy(p *Proxy) error {
 	mux := http.NewServeMux()
 	base := fmt.Sprintf("http://127.0.0.1:%d", p.localPort)
 
+	// publicHost is the host:port clients see. If s.addr binds 0.0.0.0 or
+	// omits a host, we default to 127.0.0.1 so rewritten URLs are usable.
+	publicHost := s.addr
+	if host, port, err := net.SplitHostPort(s.addr); err == nil {
+		if host == "" || host == "0.0.0.0" || host == "::" {
+			host = "127.0.0.1"
+		}
+		publicHost = net.JoinHostPort(host, port)
+	}
+
 	forwardJSON := func(path string) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			u := base + path
@@ -161,13 +171,23 @@ func (s *Server) RunWithProxy(p *Proxy) error {
 				return
 			}
 			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadGateway)
+				return
+			}
+			rewritten := rewriteDevtoolsJSON(body, publicHost)
 			for k, vv := range resp.Header {
+				if k == "Content-Length" {
+					continue
+				}
 				for _, v := range vv {
 					w.Header().Add(k, v)
 				}
 			}
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(resp.StatusCode)
-			_, _ = io.Copy(w, resp.Body)
+			_, _ = w.Write(rewritten)
 		}
 	}
 
@@ -201,4 +221,118 @@ func (s *Server) RunWithProxy(p *Proxy) error {
 
 	srv.Handler = mux
 	return nil
+}
+
+// rewriteDevtoolsJSON takes a raw /json/version or /json/list body from the
+// upstream Chrome (served via the adb forward on 127.0.0.1:<localPort>) and
+// rewrites any webSocketDebuggerUrl / devtoolsFrontendUrl fields so they
+// point back at this server's publicHost. That ensures CDP clients which
+// follow those URLs (Puppeteer, chrome-remote-interface) keep their traffic
+// going through mobilebridge instead of bypassing it.
+//
+// If the body isn't JSON we recognise, it's returned unchanged.
+func rewriteDevtoolsJSON(body []byte, publicHost string) []byte {
+	trimmed := bytesTrimSpace(body)
+	if len(trimmed) == 0 {
+		return body
+	}
+	switch trimmed[0] {
+	case '[':
+		var arr []map[string]interface{}
+		if err := json.Unmarshal(body, &arr); err != nil {
+			return body
+		}
+		for _, entry := range arr {
+			rewriteEntry(entry, publicHost)
+		}
+		out, err := json.Marshal(arr)
+		if err != nil {
+			return body
+		}
+		return out
+	case '{':
+		var obj map[string]interface{}
+		if err := json.Unmarshal(body, &obj); err != nil {
+			return body
+		}
+		rewriteEntry(obj, publicHost)
+		out, err := json.Marshal(obj)
+		if err != nil {
+			return body
+		}
+		return out
+	}
+	return body
+}
+
+func rewriteEntry(entry map[string]interface{}, publicHost string) {
+	if v, ok := entry["webSocketDebuggerUrl"].(string); ok {
+		entry["webSocketDebuggerUrl"] = rewriteWSURL(v, publicHost)
+	}
+	if v, ok := entry["devtoolsFrontendUrl"].(string); ok {
+		entry["devtoolsFrontendUrl"] = rewriteFrontendURL(v, publicHost)
+	}
+}
+
+// rewriteWSURL replaces the host component of a ws:// URL with publicHost,
+// leaving scheme/path intact.
+func rewriteWSURL(raw, publicHost string) string {
+	idx := indexOf(raw, "://")
+	if idx < 0 {
+		return raw
+	}
+	scheme := raw[:idx]
+	rest := raw[idx+3:]
+	slash := indexOfByte(rest, '/')
+	if slash < 0 {
+		return scheme + "://" + publicHost
+	}
+	return scheme + "://" + publicHost + rest[slash:]
+}
+
+// rewriteFrontendURL rewrites the `ws=host:port` query parameter Chrome
+// embeds in devtoolsFrontendUrl so opening the inspector routes through us.
+func rewriteFrontendURL(raw, publicHost string) string {
+	i := indexOf(raw, "ws=")
+	if i < 0 {
+		return raw
+	}
+	prefix := raw[:i+3]
+	rest := raw[i+3:]
+	end := indexOfByte(rest, '/')
+	amp := indexOfByte(rest, '&')
+	cut := end
+	if amp >= 0 && (cut < 0 || amp < cut) {
+		cut = amp
+	}
+	if cut < 0 {
+		return prefix + publicHost
+	}
+	return prefix + publicHost + rest[cut:]
+}
+
+func indexOf(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
+}
+
+func indexOfByte(s string, b byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == b {
+			return i
+		}
+	}
+	return -1
+}
+
+func bytesTrimSpace(b []byte) []byte {
+	i := 0
+	for i < len(b) && (b[i] == ' ' || b[i] == '\t' || b[i] == '\n' || b[i] == '\r') {
+		i++
+	}
+	return b[i:]
 }
