@@ -3,6 +3,7 @@ package mobilebridge
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -222,6 +223,66 @@ func TestProxyUnknownMobileBridgeMethod(t *testing.T) {
 	}
 	if resp.ID != 7 {
 		t.Errorf("id = %d, want 7", resp.ID)
+	}
+}
+
+// TestProxyServe_RejectsSecondClient verifies that once one client is
+// attached via Serve, a second concurrent Serve call fails with ErrBusy.
+func TestProxyServe_RejectsSecondClient(t *testing.T) {
+	rec := newUpstreamRecorder()
+	defer rec.Close()
+
+	upConn := dialUpstream(t, rec.WSURL())
+	p := &Proxy{upstream: upConn, closed: make(chan struct{})}
+	p.registerDefaultMethodHandlers()
+	defer func() { _ = upConn.Close() }()
+
+	// Downstream #1 WS server — hands the conn to Serve and blocks.
+	upg := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	serveErr1 := make(chan error, 1)
+	ds1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := upg.Upgrade(w, r, nil)
+		if err != nil {
+			serveErr1 <- err
+			return
+		}
+		serveErr1 <- p.Serve(context.Background(), ws)
+	}))
+	defer ds1.Close()
+
+	client1, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(ds1.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("dial client1: %v", err)
+	}
+	defer client1.Close()
+
+	// Wait until Busy flips true (Serve took the lock).
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for !p.Busy() && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if !p.Busy() {
+		t.Fatal("proxy never became busy after client1 connected")
+	}
+
+	// Second Serve call must fail with ErrBusy without touching the conn.
+	// We use a bare non-nil downstream (a real *websocket.Conn isn't needed
+	// because Serve short-circuits on busy before reading).
+	rec2 := newUpstreamRecorder()
+	defer rec2.Close()
+	ws2 := dialUpstream(t, rec2.WSURL())
+	defer ws2.Close()
+	err = p.Serve(context.Background(), ws2)
+	if !errors.Is(err, ErrBusy) {
+		t.Errorf("second Serve err = %v, want ErrBusy", err)
+	}
+
+	// Release client1 so Serve returns cleanly.
+	_ = client1.Close()
+	select {
+	case <-serveErr1:
+	case <-time.After(2 * time.Second):
+		t.Error("first Serve did not return after client close")
 	}
 }
 
