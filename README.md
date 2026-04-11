@@ -246,6 +246,30 @@ Common ADB issues and how to unstick them:
   phones rely on Chrome's `localabstract:chrome_devtools_remote` which
   does not need root.
 
+## Testing
+
+mobilebridge's unit tests stub `adb` via an overridable `commandRunner` so
+the whole suite runs without a phone attached. Run it with the race
+detector enabled — several tests exercise the reader/writer reconnect
+goroutines and will catch regressions there only under `-race`:
+
+```
+go test ./... -race
+```
+
+For a real-device smoke test, plug in an authorized Android phone with
+Chrome open on any tab, then run the CLI against it end-to-end:
+
+```
+mobilebridge --list                                  # confirms adb sees the device
+mobilebridge --serial <SERIAL> --port 9222 &          # starts the bridge
+curl http://127.0.0.1:9222/json/version | jq .Browser # expect "Chrome/..."
+```
+
+Point a Puppeteer or OpenClaw instance at `ws://127.0.0.1:9222/...` and
+drive a navigation to verify the CDP pump is alive. Ctrl-C the bridge to
+tear down the adb forward when you're done.
+
 ## Compatibility
 
 | Component                    | Versions known to work                      |
