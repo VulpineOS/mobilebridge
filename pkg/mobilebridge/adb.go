@@ -37,13 +37,16 @@ var commandRunner = func(ctx context.Context, name string, args ...string) ([]by
 // adbPath is the executable used for ADB calls. Tests may override it.
 var adbPath = "adb"
 
-func runADB(args ...string) ([]byte, error) {
-	return commandRunner(context.Background(), adbPath, args...)
+func runADB(ctx context.Context, args ...string) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return commandRunner(ctx, adbPath, args...)
 }
 
 // ListDevices runs `adb devices -l` and parses the result.
-func ListDevices() ([]Device, error) {
-	out, err := runADB("devices", "-l")
+func ListDevices(ctx context.Context) ([]Device, error) {
+	out, err := runADB(ctx, "devices", "-l")
 	if err != nil {
 		return nil, fmt.Errorf("adb devices: %w: %s", err, string(out))
 	}
@@ -95,11 +98,11 @@ func parseDevices(out string) []Device {
 }
 
 // Forward runs `adb -s <serial> forward tcp:<localPort> localabstract:<remoteAbstract>`.
-func Forward(serial string, localPort int, remoteAbstract string) error {
+func Forward(ctx context.Context, serial string, localPort int, remoteAbstract string) error {
 	if serial == "" {
 		return errors.New("mobilebridge: empty serial")
 	}
-	out, err := runADB("-s", serial, "forward",
+	out, err := runADB(ctx, "-s", serial, "forward",
 		fmt.Sprintf("tcp:%d", localPort),
 		"localabstract:"+remoteAbstract,
 	)
@@ -110,11 +113,11 @@ func Forward(serial string, localPort int, remoteAbstract string) error {
 }
 
 // Unforward runs `adb -s <serial> forward --remove tcp:<localPort>`.
-func Unforward(serial string, localPort int) error {
+func Unforward(ctx context.Context, serial string, localPort int) error {
 	if serial == "" {
 		return errors.New("mobilebridge: empty serial")
 	}
-	out, err := runADB("-s", serial, "forward", "--remove", fmt.Sprintf("tcp:%d", localPort))
+	out, err := runADB(ctx, "-s", serial, "forward", "--remove", fmt.Sprintf("tcp:%d", localPort))
 	if err != nil {
 		return fmt.Errorf("adb forward --remove: %w: %s", err, string(out))
 	}
@@ -163,8 +166,8 @@ type DevtoolsSocket struct {
 // on. It returns just the socket name for backwards compatibility; callers
 // that need the Chrome-vs-WebView distinction should use
 // ChromeDevtoolsSocketInfo instead.
-func ChromeDevtoolsSocket(serial string) (string, error) {
-	info, err := ChromeDevtoolsSocketInfo(serial)
+func ChromeDevtoolsSocket(ctx context.Context, serial string) (string, error) {
+	info, err := ChromeDevtoolsSocketInfo(ctx, serial)
 	if err != nil {
 		return "", err
 	}
@@ -173,11 +176,11 @@ func ChromeDevtoolsSocket(serial string) (string, error) {
 
 // ChromeDevtoolsSocketInfo is like ChromeDevtoolsSocket but also reports
 // whether the socket belongs to Chrome or a WebView host.
-func ChromeDevtoolsSocketInfo(serial string) (DevtoolsSocket, error) {
+func ChromeDevtoolsSocketInfo(ctx context.Context, serial string) (DevtoolsSocket, error) {
 	if serial == "" {
 		return DevtoolsSocket{}, errors.New("mobilebridge: empty serial")
 	}
-	out, err := runADB("-s", serial, "shell", "cat", "/proc/net/unix")
+	out, err := runADB(ctx, "-s", serial, "shell", "cat", "/proc/net/unix")
 	if err != nil {
 		return DevtoolsSocket{}, fmt.Errorf("adb shell cat /proc/net/unix: %w: %s", err, string(out))
 	}

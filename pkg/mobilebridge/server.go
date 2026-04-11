@@ -212,7 +212,7 @@ func (s *Server) RunWithProxy(p *Proxy) error {
 			return
 		}
 		defer ws.Close()
-		if err := p.Serve(ws); err != nil && errors.Is(err, ErrBusy) {
+		if err := p.Serve(r.Context(), ws); err != nil && errors.Is(err, ErrBusy) {
 			_ = ws.WriteMessage(websocket.TextMessage, []byte(`{"error":"mobilebridge busy"}`))
 		}
 	}

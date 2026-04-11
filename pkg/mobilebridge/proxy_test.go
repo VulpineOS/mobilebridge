@@ -1,6 +1,7 @@
 package mobilebridge
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -102,7 +103,7 @@ func TestProxyInterceptsMobileBridgeTap(t *testing.T) {
 			serveErr <- err
 			return
 		}
-		serveErr <- p.Serve(ws)
+		serveErr <- p.Serve(context.Background(), ws)
 	}))
 	defer ds.Close()
 
@@ -189,7 +190,7 @@ func TestProxyUnknownMobileBridgeMethod(t *testing.T) {
 			serveErr <- err
 			return
 		}
-		serveErr <- p.Serve(ws)
+		serveErr <- p.Serve(context.Background(), ws)
 	}))
 	defer ds.Close()
 

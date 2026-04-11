@@ -106,7 +106,7 @@ func withStubRunner(t *testing.T, out string, err error) *[]stubCall {
 
 func TestListDevicesUsesRunner(t *testing.T) {
 	calls := withStubRunner(t, sampleDevicesOutput, nil)
-	devs, err := ListDevices()
+	devs, err := ListDevices(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func TestListDevicesUsesRunner(t *testing.T) {
 
 func TestForwardArgs(t *testing.T) {
 	calls := withStubRunner(t, "", nil)
-	if err := Forward("R58N", 9222, "chrome_devtools_remote"); err != nil {
+	if err := Forward(context.Background(), "R58N", 9222, "chrome_devtools_remote"); err != nil {
 		t.Fatal(err)
 	}
 	if len(*calls) != 1 {
@@ -136,14 +136,14 @@ func TestForwardArgs(t *testing.T) {
 }
 
 func TestForwardEmptySerial(t *testing.T) {
-	if err := Forward("", 9222, "x"); err == nil {
+	if err := Forward(context.Background(), "", 9222, "x"); err == nil {
 		t.Error("expected error for empty serial")
 	}
 }
 
 func TestUnforwardArgs(t *testing.T) {
 	calls := withStubRunner(t, "", nil)
-	if err := Unforward("R58N", 9222); err != nil {
+	if err := Unforward(context.Background(), "R58N", 9222); err != nil {
 		t.Fatal(err)
 	}
 	want := "-s R58N forward --remove tcp:9222"
@@ -154,7 +154,7 @@ func TestUnforwardArgs(t *testing.T) {
 
 func TestChromeDevtoolsSocket(t *testing.T) {
 	withStubRunner(t, sampleProcNetUnixChrome, nil)
-	name, err := ChromeDevtoolsSocket("R58N")
+	name, err := ChromeDevtoolsSocket(context.Background(), "R58N")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,21 +165,21 @@ func TestChromeDevtoolsSocket(t *testing.T) {
 
 func TestChromeDevtoolsSocketError(t *testing.T) {
 	withStubRunner(t, "boom", errors.New("exit 1"))
-	if _, err := ChromeDevtoolsSocket("R58N"); err == nil {
+	if _, err := ChromeDevtoolsSocket(context.Background(), "R58N"); err == nil {
 		t.Error("expected error")
 	}
 }
 
 func TestChromeDevtoolsSocketNone(t *testing.T) {
 	withStubRunner(t, sampleProcNetUnixNone, nil)
-	if _, err := ChromeDevtoolsSocket("R58N"); err == nil {
+	if _, err := ChromeDevtoolsSocket(context.Background(), "R58N"); err == nil {
 		t.Error("expected error when no socket present")
 	}
 }
 
 func TestChromeDevtoolsSocketInfoChrome(t *testing.T) {
 	withStubRunner(t, sampleProcNetUnixChrome, nil)
-	info, err := ChromeDevtoolsSocketInfo("R58N")
+	info, err := ChromeDevtoolsSocketInfo(context.Background(), "R58N")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestChromeDevtoolsSocketInfoChrome(t *testing.T) {
 
 func TestChromeDevtoolsSocketInfoWebView(t *testing.T) {
 	withStubRunner(t, sampleProcNetUnixWebviewOnly, nil)
-	info, err := ChromeDevtoolsSocketInfo("R58N")
+	info, err := ChromeDevtoolsSocketInfo(context.Background(), "R58N")
 	if err != nil {
 		t.Fatal(err)
 	}

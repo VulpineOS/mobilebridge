@@ -76,7 +76,7 @@ func runBridge(device string, port int, autoRestart bool, screenRecord string, l
 		}
 		log.Printf("using device %s (attempt %d)", serial, attempt)
 
-		proxy, err := mobilebridge.NewProxy(serial, port)
+		proxy, err := mobilebridge.NewProxy(context.Background(), serial, port)
 		if err != nil {
 			if autoRestart {
 				log.Printf("new proxy failed: %v (retrying in 2s)", err)
@@ -168,7 +168,7 @@ func runBridge(device string, port int, autoRestart bool, screenRecord string, l
 }
 
 func runList() error {
-	devs, err := mobilebridge.ListDevices()
+	devs, err := mobilebridge.ListDevices(context.Background())
 	if err != nil {
 		return err
 	}
@@ -178,7 +178,7 @@ func runList() error {
 	}
 	for _, d := range devs {
 		label := ""
-		if info, err := mobilebridge.ChromeDevtoolsSocketInfo(d.Serial); err == nil {
+		if info, err := mobilebridge.ChromeDevtoolsSocketInfo(context.Background(), d.Serial); err == nil {
 			switch info.Kind {
 			case mobilebridge.SocketKindChrome:
 				label = "[Chrome]"
@@ -221,7 +221,7 @@ func runHealth(device string) error {
 	}
 	fmt.Printf("device:  %s\n", serial)
 
-	info, err := mobilebridge.ChromeDevtoolsSocketInfo(serial)
+	info, err := mobilebridge.ChromeDevtoolsSocketInfo(context.Background(), serial)
 	if err != nil {
 		fmt.Printf("socket:  NOT FOUND (%v)\n", err)
 		return nil
@@ -231,7 +231,7 @@ func runHealth(device string) error {
 }
 
 func runDevicesEnriched() error {
-	devs, err := mobilebridge.ListDevices()
+	devs, err := mobilebridge.ListDevices(context.Background())
 	if err != nil {
 		return err
 	}
@@ -279,7 +279,7 @@ func resolveSerial(explicit string) (string, error) {
 	if explicit != "" {
 		return explicit, nil
 	}
-	devs, err := mobilebridge.ListDevices()
+	devs, err := mobilebridge.ListDevices(context.Background())
 	if err != nil {
 		return "", err
 	}

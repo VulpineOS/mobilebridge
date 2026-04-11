@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 // proxyWithSender builds a minimal Proxy wired to a fake messageSender so
@@ -268,6 +269,28 @@ func TestBuildTouchEventJSONShape(t *testing.T) {
 	}
 	if !contains(string(b), `"x":1`) || !contains(string(b), `"y":2`) {
 		t.Errorf("missing coords in %s", b)
+	}
+}
+
+// TestLongPressRespectsContextCancellation verifies LongPress bails out of
+// its sleep when ctx is canceled, instead of blocking for the full duration.
+func TestLongPressRespectsContextCancellation(t *testing.T) {
+	f := &fakeSender{}
+	p := proxyWithSender(f)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- p.LongPress(ctx, 10, 20, 60000) // 60s; would hang pre-M4
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("expected ctx.Err, got nil")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("LongPress did not honor ctx cancellation")
 	}
 }
 

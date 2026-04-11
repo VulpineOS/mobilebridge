@@ -92,25 +92,28 @@ var ErrBusy = errors.New("mobilebridge: proxy is already serving a client")
 // NewProxy sets up adb forwarding to the given device's Chrome devtools
 // socket, queries Chrome's /json/version endpoint to find the browser-level
 // WebSocket URL, and dials it. It returns a ready-to-Serve Proxy.
-func NewProxy(serial string, localPort int) (*Proxy, error) {
-	sock, err := ChromeDevtoolsSocket(serial)
+func NewProxy(ctx context.Context, serial string, localPort int) (*Proxy, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	sock, err := ChromeDevtoolsSocket(ctx, serial)
 	if err != nil {
 		return nil, fmt.Errorf("find devtools socket: %w", err)
 	}
-	if err := Forward(serial, localPort, sock); err != nil {
+	if err := Forward(ctx, serial, localPort, sock); err != nil {
 		return nil, fmt.Errorf("adb forward: %w", err)
 	}
 
 	wsURL, err := fetchBrowserWebSocketURL(fmt.Sprintf("http://127.0.0.1:%d", localPort))
 	if err != nil {
-		_ = Unforward(serial, localPort)
+		_ = Unforward(ctx, serial, localPort)
 		return nil, fmt.Errorf("fetch browser ws url: %w", err)
 	}
 
 	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
 	conn, _, err := dialer.Dial(wsURL, nil)
 	if err != nil {
-		_ = Unforward(serial, localPort)
+		_ = Unforward(ctx, serial, localPort)
 		return nil, fmt.Errorf("dial upstream: %w", err)
 	}
 
@@ -277,12 +280,15 @@ func (p *Proxy) sendUpstream(method string, params any) error {
 	return conn.WriteMessage(websocket.TextMessage, b)
 }
 
-// Serve pumps frames in both directions until either side hangs up. Only
-// one client may be attached at a time; a second concurrent call returns
-// ErrBusy without touching the connection.
-func (p *Proxy) Serve(downstream *websocket.Conn) error {
+// Serve pumps frames in both directions until either side hangs up or ctx
+// is canceled. Only one client may be attached at a time; a second
+// concurrent call returns ErrBusy without touching the connection.
+func (p *Proxy) Serve(ctx context.Context, downstream *websocket.Conn) error {
 	if downstream == nil {
 		return errors.New("mobilebridge: nil downstream")
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	p.serveMu.Lock()
 	if p.busy {
@@ -393,6 +399,8 @@ func (p *Proxy) Serve(downstream *websocket.Conn) error {
 		return err
 	case <-p.closed:
 		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -485,7 +493,7 @@ func (p *Proxy) Close() error {
 			err = conn.Close()
 		}
 		if p.serial != "" && p.localPort != 0 {
-			if uerr := Unforward(p.serial, p.localPort); uerr != nil && err == nil {
+			if uerr := Unforward(context.Background(), p.serial, p.localPort); uerr != nil && err == nil {
 				err = uerr
 			}
 		}
@@ -545,7 +553,7 @@ func (p *Proxy) reconnect() error {
 		time.Sleep(delay)
 		// Best-effort: re-run adb forward in case the forward was torn
 		// down underneath us.
-		if err := Forward(p.serial, p.localPort, p.remoteSock); err != nil {
+		if err := Forward(context.Background(), p.serial, p.localPort, p.remoteSock); err != nil {
 			lastErr = fmt.Errorf("adb forward: %w", err)
 			continue
 		}

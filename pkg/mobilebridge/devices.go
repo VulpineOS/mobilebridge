@@ -49,7 +49,7 @@ func WatchDevices(ctx context.Context) (<-chan DeviceEvent, error) {
 		// Added so callers can treat the channel as the single source of
 		// truth.
 		tick := func() {
-			devs, err := ListDevices()
+			devs, err := ListDevices(ctx)
 			if err != nil {
 				return
 			}
