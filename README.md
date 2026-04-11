@@ -129,8 +129,8 @@ dance and converts user-friendly kilobits-per-second into Chrome's
 bytes-per-second format:
 
 ```go
-mobilebridge.EmulateNetworkConditions(p, false, 200, 1600, 750) // ~3G: 200ms latency, 1.6 Mbps down, 750 kbps up
-mobilebridge.EmulateNetworkConditions(p, true,  0,   0,    0)   // offline
+p.EmulateNetworkConditions(false, 200, 1600, 750) // ~3G: 200ms latency, 1.6 Mbps down, 750 kbps up
+p.EmulateNetworkConditions(true,  0,   0,    0)   // offline
 ```
 
 ## Device enrichment

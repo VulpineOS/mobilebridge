@@ -49,11 +49,20 @@ func buildNetworkConditions(offline bool, latencyMs int, downloadKbps, uploadKbp
 // downloadKbps / uploadKbps are in kilobits-per-second (the unit every
 // "throttle me like a 3G phone" UI uses). They are converted to Chrome's
 // expected bytes-per-second internally.
-func EmulateNetworkConditions(p *Proxy, offline bool, latencyMs int, downloadKbps, uploadKbps int) error {
+func (p *Proxy) EmulateNetworkConditions(offline bool, latencyMs int, downloadKbps, uploadKbps int) error {
 	if p == nil {
 		return errors.New("mobilebridge: nil proxy")
 	}
 	return emulateNetworkConditionsOn(p, offline, latencyMs, downloadKbps, uploadKbps)
+}
+
+// EmulateNetworkConditions is a thin wrapper around (*Proxy).EmulateNetworkConditions
+// kept for backward compatibility with iteration 4 callers.
+//
+// Deprecated: use p.EmulateNetworkConditions directly; the free function will
+// be removed in a future release.
+func EmulateNetworkConditions(p *Proxy, offline bool, latencyMs int, downloadKbps, uploadKbps int) error {
+	return p.EmulateNetworkConditions(offline, latencyMs, downloadKbps, uploadKbps)
 }
 
 // emulateNetworkConditionsOn is the messageSender-typed implementation used
