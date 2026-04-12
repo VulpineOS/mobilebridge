@@ -86,9 +86,12 @@ type Proxy struct {
 	// doneOnce + done combine into a one-shot signal that the proxy can no
 	// longer recover. It is closed either by Close() or by reconnect() when
 	// the backoff schedule is exhausted. Consumers select on Done() to
-	// notice upstream loss without polling Upstream().
-	doneOnce sync.Once
-	done     chan struct{}
+	// notice upstream loss without polling Upstream(). doneInitOnce lazily
+	// allocates p.done for test-constructed Proxy{} values; NewProxy pre-
+	// allocates the channel so production code never hits it.
+	doneInitOnce sync.Once
+	doneOnce     sync.Once
+	done         chan struct{}
 }
 
 // ErrBusy is returned by Proxy.Serve if a second client tries to attach
@@ -549,29 +552,32 @@ func (p *Proxy) maybeHandleSynthetic(raw []byte) (bool, []byte) {
 	return true, b
 }
 
+// ensureDoneChan lazily allocates p.done via a dedicated once, so Done()
+// and signalDone() never touch upstreamMu. NewProxy pre-allocates p.done
+// so production code never hits the once, but hand-built Proxy{} values in
+// tests still work without having to set p.done explicitly.
+func (p *Proxy) ensureDoneChan() {
+	p.doneInitOnce.Do(func() {
+		if p.done == nil {
+			p.done = make(chan struct{})
+		}
+	})
+}
+
 // Done returns a channel that is closed when the proxy can no longer serve
 // traffic — either because Close was called or because reconnect() gave up
 // after exhausting the backoff schedule. CLI callers select on this to
 // notice upstream loss without polling Upstream().
 func (p *Proxy) Done() <-chan struct{} {
-	p.upstreamMu.Lock()
-	if p.done == nil {
-		p.done = make(chan struct{})
-	}
-	ch := p.done
-	p.upstreamMu.Unlock()
-	return ch
+	p.ensureDoneChan()
+	return p.done
 }
 
-// signalDone closes the Done() channel at most once.
+// signalDone closes the Done() channel at most once. Uses its own once so
+// it does not contend with in-flight upstream writes on upstreamMu.
 func (p *Proxy) signalDone() {
-	p.upstreamMu.Lock()
-	if p.done == nil {
-		p.done = make(chan struct{})
-	}
-	ch := p.done
-	p.upstreamMu.Unlock()
-	p.doneOnce.Do(func() { close(ch) })
+	p.ensureDoneChan()
+	p.doneOnce.Do(func() { close(p.done) })
 }
 
 // Close tears down the upstream WebSocket and removes the adb forward.

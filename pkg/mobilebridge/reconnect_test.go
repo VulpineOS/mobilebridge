@@ -189,8 +189,8 @@ func TestProxyDoneClosedAfterReconnectGivesUp(t *testing.T) {
 		localPort:  port,
 		remoteSock: "chrome_devtools_remote",
 		closed:     make(chan struct{}),
+		done:       make(chan struct{}),
 	}
-	// Prime Done() before reconnect so we exercise the lazy-init path.
 	done := p.Done()
 
 	if err := p.reconnect(); err == nil {
@@ -522,6 +522,33 @@ func TestProxy_ReaderInitiatedReconnect(t *testing.T) {
 	select {
 	case <-serveErr:
 	case <-time.After(2 * time.Second):
+	}
+}
+
+// TestDone_NoLazyInit_NoUpstreamMuContention verifies that Done() does not
+// contend on upstreamMu: even while a long-running write is holding the
+// upstream lock, Done() must return immediately without blocking. The
+// pre-fix implementation lazy-initialized p.done under upstreamMu, so
+// Done() could stall behind an in-flight WriteMessage.
+func TestDone_NoLazyInit_NoUpstreamMuContention(t *testing.T) {
+	p := &Proxy{
+		closed: make(chan struct{}),
+	}
+	// Simulate an in-flight writer holding upstreamMu.RLock — this is
+	// what writeUpstream and sendUpstream now do across WriteMessage.
+	p.upstreamMu.RLock()
+	defer p.upstreamMu.RUnlock()
+
+	done := make(chan struct{})
+	go func() {
+		_ = p.Done()
+		close(done)
+	}()
+	select {
+	case <-done:
+		// good — Done() did not block on upstreamMu
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("Done() blocked on upstreamMu — lazy init path is still touching upstream lock")
 	}
 }
 
