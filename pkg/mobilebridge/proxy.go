@@ -591,6 +591,12 @@ func (p *Proxy) Close() error {
 	return err
 }
 
+// reconnectSwapHook is called, if non-nil, right after reconnect() clears
+// p.upstream and sets p.reconnectGate, before the backoff loop starts.
+// Tests use it to widen the swap window and verify the reader pump does
+// not tear down during the gap. Production code leaves it nil.
+var reconnectSwapHook func()
+
 // reconnectBackoff is the escalating delay sequence for reconnect attempts.
 // Overridable from tests.
 var reconnectBackoff = []time.Duration{
@@ -679,6 +685,9 @@ func (p *Proxy) reconnect() error {
 	p.upstreamMu.Unlock()
 	if old != nil {
 		_ = old.Close()
+	}
+	if reconnectSwapHook != nil {
+		reconnectSwapHook()
 	}
 
 	var lastErr error

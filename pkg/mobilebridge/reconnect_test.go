@@ -536,6 +536,106 @@ func TestProxy_ReaderInitiatedReconnect(t *testing.T) {
 	}
 }
 
+// TestReconnect_ReaderSurvivesWidenedSwapWindow installs a hook that sleeps
+// between clearing the upstream conn and starting the dial loop, widening
+// the window in which a reader could observe the swap. The reader pump must
+// hold off on tearing down Serve during this window because reconnectGate
+// is set atomically with clearing p.upstream.
+func TestReconnect_ReaderSurvivesWidenedSwapWindow(t *testing.T) {
+	origBackoff := reconnectBackoff
+	reconnectBackoff = []time.Duration{1 * time.Millisecond}
+	t.Cleanup(func() { reconnectBackoff = origBackoff })
+
+	origRunner := commandRunner
+	commandRunner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		return nil, nil
+	}
+	t.Cleanup(func() { commandRunner = origRunner })
+
+	origHook := reconnectSwapHook
+	reconnectSwapHook = func() { time.Sleep(50 * time.Millisecond) }
+	t.Cleanup(func() { reconnectSwapHook = origHook })
+
+	up2 := newUpstreamRecorder()
+	defer up2.Close()
+	jsonSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"Browser":"Chrome/stub","webSocketDebuggerUrl":%q}`, up2.WSURL())
+	}))
+	defer jsonSrv.Close()
+	_, portStr, _ := net.SplitHostPort(strings.TrimPrefix(jsonSrv.URL, "http://"))
+	var port int
+	fmt.Sscanf(portStr, "%d", &port)
+
+	up1 := newUpstreamRecorder()
+	defer up1.Close()
+	conn1, _, err := websocket.DefaultDialer.Dial(up1.WSURL(), nil)
+	if err != nil {
+		t.Fatalf("dial up1: %v", err)
+	}
+
+	p := &Proxy{
+		serial:     "STUB",
+		localPort:  port,
+		remoteSock: "chrome_devtools_remote",
+		upstream:   conn1,
+		closed:     make(chan struct{}),
+		done:       make(chan struct{}),
+	}
+	p.registerDefaultMethodHandlers()
+
+	upg := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	serveErr := make(chan error, 1)
+	dsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := upg.Upgrade(w, r, nil)
+		if err != nil {
+			serveErr <- err
+			return
+		}
+		serveErr <- p.Serve(context.Background(), ws)
+	}))
+	defer dsSrv.Close()
+	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(dsSrv.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("dial client: %v", err)
+	}
+	defer client.Close()
+
+	// Give the Serve goroutines a moment to enter their read loops.
+	time.Sleep(20 * time.Millisecond)
+
+	// Drive a reconnect while the reader is parked. The swap hook sleeps
+	// 50ms, widening any conn==nil window. The reader must NOT exit Serve
+	// during this period.
+	go func() { _ = p.reconnect() }()
+
+	// Wait past the hook window plus dial time.
+	time.Sleep(150 * time.Millisecond)
+
+	// Prove Serve is still running: push a frame through up2 and read it.
+	// up2 is a recorder, so grab its server conn via WSURL replay — we
+	// instead just validate by issuing a new write-upstream path.
+	p.upstreamMu.RLock()
+	live := p.upstream
+	p.upstreamMu.RUnlock()
+	if live == nil {
+		t.Fatal("upstream nil after reconnect; swap did not complete")
+	}
+
+	select {
+	case err := <-serveErr:
+		t.Fatalf("Serve exited during widened swap window: %v", err)
+	default:
+	}
+
+	_ = client.Close()
+	_ = p.Close()
+	select {
+	case <-serveErr:
+	case <-time.After(2 * time.Second):
+	}
+}
+
 // TestReconnect_Serialized spawns several goroutines all calling reconnect()
 // simultaneously and verifies that only one actually runs the reconnect
 // cycle. The others must observe the in-flight gate and return its result,
