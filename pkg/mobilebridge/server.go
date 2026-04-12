@@ -40,6 +40,33 @@ type Server struct {
 // soak a burst of concurrent polls down to a single upstream request.
 const jsonListCacheTTL = 500 * time.Millisecond
 
+// WatchDeviceChanges starts a WatchDevices goroutine bound to ctx and
+// invalidates the /json/list cache on every add/remove event, so the next
+// poll fetches a fresh list rather than serving the previous device's tabs
+// for up to jsonListCacheTTL. Returns immediately after starting the watcher.
+func (s *Server) WatchDeviceChanges(ctx context.Context) error {
+	events, err := WatchDevices(ctx)
+	if err != nil {
+		return err
+	}
+	go func() {
+		for range events {
+			s.invalidateListCache()
+		}
+	}()
+	return nil
+}
+
+// invalidateListCache wipes the /json/list response cache so the next hit
+// forces a fresh upstream fetch. Called on device hotplug and whenever a
+// new proxy is attached via RunWithProxy.
+func (s *Server) invalidateListCache() {
+	s.listCacheMu.Lock()
+	s.listCacheBuf = nil
+	s.listCacheAt = time.Time{}
+	s.listCacheMu.Unlock()
+}
+
 // NewServer constructs a Server bound to addr (e.g. "127.0.0.1:9222") that
 // will proxy CDP traffic to the named device.
 func NewServer(serial string, addr string) *Server {
@@ -154,6 +181,10 @@ func (s *Server) RunWithProxy(p *Proxy) error {
 	if p == nil {
 		return errors.New("mobilebridge: nil proxy")
 	}
+	// A new proxy means a (potentially) new device / Chrome instance — any
+	// cached /json/list body belongs to the previous session and must not
+	// leak across the swap.
+	s.invalidateListCache()
 	s.mu.Lock()
 	srv := s.httpSrv
 	s.mu.Unlock()

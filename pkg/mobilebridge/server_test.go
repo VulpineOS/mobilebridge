@@ -141,6 +141,85 @@ func TestJsonListCache_HitsWithin500ms(t *testing.T) {
 	}
 }
 
+// TestJsonListCache_InvalidatedOnDeviceChange ensures RunWithProxy wipes
+// the /json/list cache so the first request after attaching a new device's
+// proxy always refetches upstream instead of serving the previous device's
+// tab list for up to jsonListCacheTTL.
+func TestJsonListCache_InvalidatedOnDeviceChange(t *testing.T) {
+	var hits int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `[{"id":"X","title":"t","webSocketDebuggerUrl":"ws://127.0.0.1:9999/devtools/page/X"}]`)
+	}))
+	defer upstream.Close()
+
+	upHost := strings.TrimPrefix(upstream.URL, "http://")
+	upPort := 0
+	if _, err := fmtSscanfPort(upHost, &upPort); err != nil {
+		t.Fatalf("parse upstream port: %v", err)
+	}
+	p := &Proxy{localPort: upPort}
+	s := NewServer("fake-serial", "127.0.0.1:9224")
+	if err := s.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+	if err := s.RunWithProxy(p); err != nil {
+		t.Fatalf("wire: %v", err)
+	}
+
+	// Populate the cache.
+	resp, err := http.Get("http://127.0.0.1:9224/json/list")
+	if err != nil {
+		t.Fatalf("get 1: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("first fetch should miss: hits=%d", got)
+	}
+
+	// A follow-up within the TTL should hit the cache (no new upstream hit).
+	resp, err = http.Get("http://127.0.0.1:9224/json/list")
+	if err != nil {
+		t.Fatalf("get 2: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("second fetch should be cached: hits=%d", got)
+	}
+
+	// Attach a new proxy (device swap) — cache must be invalidated.
+	p2 := &Proxy{localPort: upPort}
+	if err := s.RunWithProxy(p2); err != nil {
+		t.Fatalf("re-wire: %v", err)
+	}
+	resp, err = http.Get("http://127.0.0.1:9224/json/list")
+	if err != nil {
+		t.Fatalf("get 3: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Errorf("fetch after RunWithProxy should miss cache: hits=%d want 2", got)
+	}
+
+	// Direct invalidateListCache call (as WatchDevices would do) forces
+	// another miss.
+	s.invalidateListCache()
+	resp, err = http.Get("http://127.0.0.1:9224/json/list")
+	if err != nil {
+		t.Fatalf("get 4: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if got := atomic.LoadInt32(&hits); got != 3 {
+		t.Errorf("fetch after invalidate should miss cache: hits=%d want 3", got)
+	}
+}
+
 // TestRewriteDevtoolsJSON_IPv6 exercises the IPv6 literal path. The naive
 // string splice in the old rewriteWSURL broke because `[::1]` contains
 // colons and the function used `strings.Index(rest, "/")` on a host slice
