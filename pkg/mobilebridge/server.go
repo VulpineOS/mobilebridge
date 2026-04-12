@@ -401,34 +401,45 @@ func rewriteWSURL(raw, publicHost string) string {
 // embeds in devtoolsFrontendUrl so opening the inspector routes through us.
 // Chrome emits this unescaped (e.g. "ws=127.0.0.1:9222/devtools/page/ABC")
 // and we must preserve that shape — url.Values.Encode would percent-encode
-// the slashes and break every real devtools frontend. So we do a targeted
-// substring splice but use net/url to locate the `ws=` boundary robustly.
+// the slashes and break every real devtools frontend. We locate the `ws=`
+// segment by splitting on the query separator so matches inside the path
+// (e.g. "/devtools/ws=test/inspector.html") don't get mangled.
 func rewriteFrontendURL(raw, publicHost string) string {
-	// Fast path: find "ws=" literally. The value runs until the next '&'
-	// (query separator) or end-of-string. Within the value, split host from
-	// the trailing "/path" on the first '/'.
-	i := strings.Index(raw, "ws=")
-	if i < 0 {
+	// Split into path and query exactly once on the first '?'.
+	qIdx := strings.IndexByte(raw, '?')
+	if qIdx < 0 {
 		return raw
 	}
-	prefix := raw[:i+3]
-	rest := raw[i+3:]
-	// Value ends at next '&' in the query string.
-	valEnd := strings.IndexByte(rest, '&')
-	var value, tail string
-	if valEnd < 0 {
-		value = rest
-		tail = ""
-	} else {
-		value = rest[:valEnd]
-		tail = rest[valEnd:]
+	pathPart := raw[:qIdx+1]
+	query := raw[qIdx+1:]
+	// Drop off any fragment so it doesn't appear inside query segments.
+	var fragment string
+	if f := strings.IndexByte(query, '#'); f >= 0 {
+		fragment = query[f:]
+		query = query[:f]
 	}
-	// Within value, /path starts at the first '/' AFTER the host. IPv6
-	// bracketed host "[::1]:9222/..." has its bracket slice-safe because
-	// brackets themselves contain no '/'.
-	slash := strings.IndexByte(value, '/')
-	if slash < 0 {
-		return prefix + publicHost + tail
+	// Walk the &-separated params, only rewriting the literal "ws" key.
+	params := strings.Split(query, "&")
+	found := false
+	for i, part := range params {
+		if !strings.HasPrefix(part, "ws=") {
+			continue
+		}
+		found = true
+		value := part[3:]
+		// Within value, /path starts at the first '/' after the host.
+		// IPv6 bracketed host "[::1]:9222/..." is safe because brackets
+		// contain no '/'.
+		slash := strings.IndexByte(value, '/')
+		if slash < 0 {
+			params[i] = "ws=" + publicHost
+		} else {
+			params[i] = "ws=" + publicHost + value[slash:]
+		}
+		break
 	}
-	return prefix + publicHost + value[slash:] + tail
+	if !found {
+		return raw
+	}
+	return pathPart + strings.Join(params, "&") + fragment
 }

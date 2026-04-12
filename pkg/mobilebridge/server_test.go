@@ -70,6 +70,44 @@ func TestJsonListRewrite(t *testing.T) {
 	}
 }
 
+// TestRewriteFrontendURL_OnlyMatchesQueryParam ensures the `ws=` substring
+// match is scoped to a real query parameter. A `ws=` substring appearing in
+// the path must not get rewritten, and a `ws=` that sits in the query
+// amongst other params must still be targeted.
+func TestRewriteFrontendURL_OnlyMatchesQueryParam(t *testing.T) {
+	// Positive: ws= is a genuine query param after other params.
+	in := "/devtools/inspector.html?foo=bar&ws=oldhost:9999/devtools/page/X"
+	out := rewriteFrontendURL(in, "127.0.0.1:9222")
+	want := "/devtools/inspector.html?foo=bar&ws=127.0.0.1:9222/devtools/page/X"
+	if out != want {
+		t.Errorf("multi-param rewrite: got %q want %q", out, want)
+	}
+
+	// Negative: `ws=` in the path must not get rewritten. With no query
+	// present, the function should leave the URL alone.
+	in2 := "/devtools/ws=test/inspector.html"
+	out2 := rewriteFrontendURL(in2, "127.0.0.1:9222")
+	if out2 != in2 {
+		t.Errorf("path-only ws= was mangled: got %q want %q", out2, in2)
+	}
+
+	// Negative: `ws=` in the path with an unrelated query param must not
+	// rewrite the path occurrence.
+	in3 := "/devtools/ws=test/inspector.html?other=thing"
+	out3 := rewriteFrontendURL(in3, "127.0.0.1:9222")
+	if out3 != in3 {
+		t.Errorf("path ws= rewritten despite unrelated query: got %q", out3)
+	}
+
+	// Positive: ws= is the only param.
+	in4 := "/devtools/inspector.html?ws=upstream:9999/devtools/page/Y"
+	out4 := rewriteFrontendURL(in4, "host:1")
+	want4 := "/devtools/inspector.html?ws=host:1/devtools/page/Y"
+	if out4 != want4 {
+		t.Errorf("single-param rewrite: got %q want %q", out4, want4)
+	}
+}
+
 // TestRewriteWSURL_PreservesWss verifies that a wss:// upstream URL is NOT
 // silently downgraded to ws:// when rewritten against a plaintext HTTP
 // listener. The correct behavior is to return the URL unchanged so TLS
