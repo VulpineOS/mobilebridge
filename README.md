@@ -42,7 +42,7 @@ go install github.com/PopcornDev1/mobilebridge/cmd/mobilebridge@latest
 Or clone and build:
 
 ```
-git clone https://github.com/PopcornDev1/mobilebridge
+git clone https://github.com/VulpineOS/mobilebridge.git
 cd mobilebridge
 go build ./cmd/mobilebridge
 ```
