@@ -30,15 +30,11 @@ func scriptedRunner(script []string) (func(ctx context.Context, name string, arg
 
 func withStubbedADB(t *testing.T, runner func(ctx context.Context, name string, args ...string) ([]byte, error)) {
 	t.Helper()
-	origRunner := commandRunner
-	origLookup := adbLookupFn
 	origInterval := watchInterval
-	commandRunner = runner
-	adbLookupFn = func(string) (string, error) { return "/fake/adb", nil }
+	swapCommandRunner(t, runner)
+	swapADBLookupFn(t, func(string) (string, error) { return "/fake/adb", nil })
 	watchInterval = 5 * time.Millisecond
 	t.Cleanup(func() {
-		commandRunner = origRunner
-		adbLookupFn = origLookup
 		watchInterval = origInterval
 		_ = exec.ErrNotFound
 	})
@@ -87,6 +83,7 @@ func drainUntilClosed(t *testing.T, ch <-chan DeviceEvent, timeout time.Duration
 // TestWatchDevices_NoDuplicateAdds feeds the same device across multiple
 // ticks and asserts we emit exactly one Added event, not one per tick.
 func TestWatchDevices_NoDuplicateAdds(t *testing.T) {
+	lockTestGlobals(t)
 	const line = "List of devices attached\nSERIAL_A    device usb:1 product:p model:M transport_id:1\n"
 	runner, _ := scriptedRunner([]string{line, line, line, line, line})
 	withStubbedADB(t, runner)
@@ -118,6 +115,7 @@ func TestWatchDevices_NoDuplicateAdds(t *testing.T) {
 // TestWatchDevices_ProperlyHandlesRemoves feeds [A], [], [A] and expects
 // the full add/remove/add flicker to be reported in order.
 func TestWatchDevices_ProperlyHandlesRemoves(t *testing.T) {
+	lockTestGlobals(t)
 	const withA = "List of devices attached\nSERIAL_A    device usb:1 product:p model:M transport_id:1\n"
 	const empty = "List of devices attached\n"
 	runner, _ := scriptedRunner([]string{withA, empty, withA, withA, withA})
@@ -150,6 +148,7 @@ func TestWatchDevices_ProperlyHandlesRemoves(t *testing.T) {
 // TestWatchDevices_StateChange feeds a device that transitions from
 // "unauthorized" to "device" and expects a remove+add pair.
 func TestWatchDevices_StateChange(t *testing.T) {
+	lockTestGlobals(t)
 	const unauth = "List of devices attached\nSERIAL_A    unauthorized usb:1 transport_id:1\n"
 	const ready = "List of devices attached\nSERIAL_A    device usb:1 product:p model:M transport_id:1\n"
 	runner, _ := scriptedRunner([]string{unauth, ready, ready, ready})
@@ -185,6 +184,7 @@ func TestWatchDevices_StateChange(t *testing.T) {
 // TestWatchDevices_CtxCancellation asserts the output channel is closed
 // promptly after the context is canceled.
 func TestWatchDevices_CtxCancellation(t *testing.T) {
+	lockTestGlobals(t)
 	const line = "List of devices attached\nSERIAL_A    device usb:1 product:p model:M transport_id:1\n"
 	runner, _ := scriptedRunner([]string{line})
 	withStubbedADB(t, runner)

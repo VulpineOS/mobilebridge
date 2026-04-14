@@ -1,4 +1,4 @@
-module github.com/PopcornDev1/mobilebridge
+module github.com/VulpineOS/mobilebridge
 
 go 1.22
 

@@ -25,26 +25,23 @@ import (
 //  4. Each attempt honors the backoff delay from reconnectBackoff.
 //  5. reconnect() gives up after exhausting the backoff schedule.
 func TestProxyReconnect_BackoffSequence(t *testing.T) {
+	lockTestGlobals(t)
 	// Short backoffs so the test finishes quickly. Save + restore.
-	origBackoff := reconnectBackoff
-	reconnectBackoff = []time.Duration{
+	swapReconnectBackoff(t, []time.Duration{
 		5 * time.Millisecond,
 		10 * time.Millisecond,
 		20 * time.Millisecond,
 		40 * time.Millisecond,
-	}
-	t.Cleanup(func() { reconnectBackoff = origBackoff })
+	})
 
 	// Stub commandRunner so Forward() doesn't shell out to real adb.
-	origRunner := commandRunner
 	var forwardCalls int32
-	commandRunner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	swapCommandRunner(t, func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		if len(args) >= 2 && args[2] == "forward" {
 			atomic.AddInt32(&forwardCalls, 1)
 		}
 		return nil, nil
-	}
-	t.Cleanup(func() { commandRunner = origRunner })
+	})
 
 	// Stand up a real upstream WS server for the "succeed after N failures"
 	// case to dial into.
@@ -116,19 +113,16 @@ func TestProxyReconnect_BackoffSequence(t *testing.T) {
 // TestProxyReconnect_GivesUp verifies reconnect returns the last error after
 // the backoff schedule is exhausted without a successful dial.
 func TestProxyReconnect_GivesUp(t *testing.T) {
-	origBackoff := reconnectBackoff
-	reconnectBackoff = []time.Duration{
+	lockTestGlobals(t)
+	swapReconnectBackoff(t, []time.Duration{
 		1 * time.Millisecond,
 		2 * time.Millisecond,
 		3 * time.Millisecond,
-	}
-	t.Cleanup(func() { reconnectBackoff = origBackoff })
+	})
 
-	origRunner := commandRunner
-	commandRunner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	swapCommandRunner(t, func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		return nil, nil
-	}
-	t.Cleanup(func() { commandRunner = origRunner })
+	})
 
 	// /json/version always 503s.
 	var hits int32
@@ -160,20 +154,17 @@ func TestProxyReconnect_GivesUp(t *testing.T) {
 // attempt and asserts the proxy's Done() channel is closed so CLI callers
 // can notice the permanent loss without polling Upstream().
 func TestProxyDoneClosedAfterReconnectGivesUp(t *testing.T) {
-	origBackoff := reconnectBackoff
-	reconnectBackoff = []time.Duration{
+	lockTestGlobals(t)
+	swapReconnectBackoff(t, []time.Duration{
 		1 * time.Millisecond,
 		1 * time.Millisecond,
 		1 * time.Millisecond,
 		1 * time.Millisecond,
-	}
-	t.Cleanup(func() { reconnectBackoff = origBackoff })
+	})
 
-	origRunner := commandRunner
-	commandRunner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	swapCommandRunner(t, func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		return nil, nil
-	}
-	t.Cleanup(func() { commandRunner = origRunner })
+	})
 
 	// /json/version always 503s so Dial never succeeds.
 	jsonSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -212,15 +203,12 @@ func TestProxyDoneClosedAfterReconnectGivesUp(t *testing.T) {
 // blocked on the dead conn) picks up new reads from up2 without Serve
 // tearing down.
 func TestProxyReconnect_ReaderResumesAcrossSwap(t *testing.T) {
-	origBackoff := reconnectBackoff
-	reconnectBackoff = []time.Duration{1 * time.Millisecond}
-	t.Cleanup(func() { reconnectBackoff = origBackoff })
+	lockTestGlobals(t)
+	swapReconnectBackoff(t, []time.Duration{1 * time.Millisecond})
 
-	origRunner := commandRunner
-	commandRunner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	swapCommandRunner(t, func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		return nil, nil
-	}
-	t.Cleanup(func() { commandRunner = origRunner })
+	})
 
 	// upstream2 records its accepted conn and echoes client-sent frames
 	// back, and also exposes a channel for the test to push server-side
@@ -383,15 +371,12 @@ func TestProxyReconnect_ReaderResumesAcrossSwap(t *testing.T) {
 // kicks off a reconnect itself instead of tearing down the Serve loop. This
 // exercises the ensureReconnect() coordination path.
 func TestProxy_ReaderInitiatedReconnect(t *testing.T) {
-	origBackoff := reconnectBackoff
-	reconnectBackoff = []time.Duration{1 * time.Millisecond}
-	t.Cleanup(func() { reconnectBackoff = origBackoff })
+	lockTestGlobals(t)
+	swapReconnectBackoff(t, []time.Duration{1 * time.Millisecond})
 
-	origRunner := commandRunner
-	commandRunner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	swapCommandRunner(t, func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		return nil, nil
-	}
-	t.Cleanup(func() { commandRunner = origRunner })
+	})
 
 	// upstream #2 that the reconnect dial should land on.
 	var up2Conn *websocket.Conn
@@ -560,15 +545,12 @@ func TestDone_NoLazyInit_NoUpstreamMuContention(t *testing.T) {
 // lock before calling WriteMessage, so reconnect() could Close() the
 // same conn mid-write.
 func TestWriteUpstream_NoRaceWithReconnect(t *testing.T) {
-	origBackoff := reconnectBackoff
-	reconnectBackoff = []time.Duration{1 * time.Millisecond}
-	t.Cleanup(func() { reconnectBackoff = origBackoff })
+	lockTestGlobals(t)
+	swapReconnectBackoff(t, []time.Duration{1 * time.Millisecond})
 
-	origRunner := commandRunner
-	commandRunner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	swapCommandRunner(t, func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		return nil, nil
-	}
-	t.Cleanup(func() { commandRunner = origRunner })
+	})
 
 	up := newUpstreamRecorder()
 	defer up.Close()
@@ -633,19 +615,14 @@ func TestWriteUpstream_NoRaceWithReconnect(t *testing.T) {
 // hold off on tearing down Serve during this window because reconnectGate
 // is set atomically with clearing p.upstream.
 func TestReconnect_ReaderSurvivesWidenedSwapWindow(t *testing.T) {
-	origBackoff := reconnectBackoff
-	reconnectBackoff = []time.Duration{1 * time.Millisecond}
-	t.Cleanup(func() { reconnectBackoff = origBackoff })
+	lockTestGlobals(t)
+	swapReconnectBackoff(t, []time.Duration{1 * time.Millisecond})
 
-	origRunner := commandRunner
-	commandRunner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	swapCommandRunner(t, func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		return nil, nil
-	}
-	t.Cleanup(func() { commandRunner = origRunner })
+	})
 
-	origHook := reconnectSwapHook
-	reconnectSwapHook = func() { time.Sleep(50 * time.Millisecond) }
-	t.Cleanup(func() { reconnectSwapHook = origHook })
+	swapReconnectSwapHook(t, func() { time.Sleep(50 * time.Millisecond) })
 
 	up2 := newUpstreamRecorder()
 	defer up2.Close()
@@ -733,15 +710,12 @@ func TestReconnect_ReaderSurvivesWidenedSwapWindow(t *testing.T) {
 // otherwise a "first caller exhausts backoff and signals Done()" + "second
 // caller succeeds" race would leave a live proxy permanently marked done.
 func TestReconnect_Serialized(t *testing.T) {
-	origBackoff := reconnectBackoff
-	reconnectBackoff = []time.Duration{5 * time.Millisecond}
-	t.Cleanup(func() { reconnectBackoff = origBackoff })
+	lockTestGlobals(t)
+	swapReconnectBackoff(t, []time.Duration{5 * time.Millisecond})
 
-	origRunner := commandRunner
-	commandRunner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	swapCommandRunner(t, func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		return nil, nil
-	}
-	t.Cleanup(func() { commandRunner = origRunner })
+	})
 
 	up := newUpstreamRecorder()
 	defer up.Close()
@@ -803,15 +777,12 @@ func TestReconnect_Serialized(t *testing.T) {
 // that the reader held a snapshot of the original p.upstream and never saw
 // the swap.
 func TestProxyReconnect_ReaderResumes(t *testing.T) {
-	origBackoff := reconnectBackoff
-	reconnectBackoff = []time.Duration{1 * time.Millisecond}
-	t.Cleanup(func() { reconnectBackoff = origBackoff })
+	lockTestGlobals(t)
+	swapReconnectBackoff(t, []time.Duration{1 * time.Millisecond})
 
-	origRunner := commandRunner
-	commandRunner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	swapCommandRunner(t, func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		return nil, nil
-	}
-	t.Cleanup(func() { commandRunner = origRunner })
+	})
 
 	// Upstream #2 is what reconnect() dials after we kill #1.
 	up2 := newUpstreamRecorder()

@@ -58,10 +58,8 @@ func TestParseBatteryLevel(t *testing.T) {
 // TestDeviceEnrich_ParsesGetprop walks Device.Enrich through a fake
 // commandRunner that returns canned adb output for each of the four calls.
 func TestDeviceEnrich_ParsesGetprop(t *testing.T) {
-	orig := commandRunner
-	t.Cleanup(func() { commandRunner = orig })
-
-	commandRunner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	lockTestGlobals(t)
+	swapCommandRunner(t, func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		// Every call is "adb -s <serial> shell <...>". Match on the trailing
 		// shell command to decide what to return.
 		full := strings.Join(args, " ")
@@ -76,7 +74,7 @@ func TestDeviceEnrich_ParsesGetprop(t *testing.T) {
 			return []byte(sampleDumpsysBattery), nil
 		}
 		return []byte(""), nil
-	}
+	})
 
 	d := &Device{Serial: "R58N12ABCDE", State: "device", Model: "SM_G960U"}
 	if err := d.Enrich(context.Background()); err != nil {
@@ -101,10 +99,8 @@ func TestDeviceEnrich_ParsesGetprop(t *testing.T) {
 // the run as a failure (okAny stays false) and surfaces a parse error instead
 // of silently returning nil.
 func TestEnrich_ParseFailureCounted(t *testing.T) {
-	orig := commandRunner
-	t.Cleanup(func() { commandRunner = orig })
-
-	commandRunner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	lockTestGlobals(t)
+	swapCommandRunner(t, func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		full := strings.Join(args, " ")
 		switch {
 		case strings.Contains(full, "getprop ro.build.version.release"):
@@ -117,7 +113,7 @@ func TestEnrich_ParseFailureCounted(t *testing.T) {
 			return []byte("no level line here\n"), nil
 		}
 		return nil, nil
-	}
+	})
 
 	d := &Device{Serial: "R58N12ABCDE"}
 	err := d.Enrich(context.Background())
@@ -139,15 +135,14 @@ func TestEnrich_ParseFailureCounted(t *testing.T) {
 // populate their fields. The whole Enrich must complete well under the sum
 // of (all four individually hung) timeouts.
 func TestEnrich_HungCmdDoesntBlockOthers(t *testing.T) {
-	orig := commandRunner
 	origTimeout := enrichPerCallTimeout
+	lockTestGlobals(t)
 	t.Cleanup(func() {
-		commandRunner = orig
 		enrichPerCallTimeout = origTimeout
 	})
 	enrichPerCallTimeout = 200 * time.Millisecond
 
-	commandRunner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	swapCommandRunner(t, func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		full := strings.Join(args, " ")
 		switch {
 		case strings.Contains(full, "getprop ro.build.version.release"):
@@ -162,7 +157,7 @@ func TestEnrich_HungCmdDoesntBlockOthers(t *testing.T) {
 			return []byte(sampleDumpsysBattery), nil
 		}
 		return nil, nil
-	}
+	})
 
 	d := &Device{Serial: "R58N12ABCDE"}
 	start := time.Now()

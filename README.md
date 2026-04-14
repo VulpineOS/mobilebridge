@@ -36,7 +36,7 @@ On top of standard CDP, mobilebridge adds synthetic **touch gesture** commands (
 ## Install
 
 ```
-go install github.com/PopcornDev1/mobilebridge/cmd/mobilebridge@latest
+go install github.com/VulpineOS/mobilebridge/cmd/mobilebridge@latest
 ```
 
 Or clone and build:

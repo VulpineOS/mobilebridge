@@ -676,6 +676,11 @@ func (p *Proxy) ensureReconnect() error {
 // I/O error, so the peer resumes on the new connection once the swap
 // succeeds.
 func (p *Proxy) reconnect() error {
+	testOverrideMu.RLock()
+	backoff := append([]time.Duration(nil), reconnectBackoff...)
+	hook := reconnectSwapHook
+	testOverrideMu.RUnlock()
+
 	// Serialize: if another reconnect is already running, piggy-back on it
 	// instead of starting a second cycle in parallel.
 	gate := make(chan struct{})
@@ -699,12 +704,12 @@ func (p *Proxy) reconnect() error {
 	if old != nil {
 		_ = old.Close()
 	}
-	if reconnectSwapHook != nil {
-		reconnectSwapHook()
+	if hook != nil {
+		hook()
 	}
 
 	var lastErr error
-	for _, delay := range reconnectBackoff {
+	for _, delay := range backoff {
 		time.Sleep(delay)
 		// Best-effort: re-run adb forward in case the forward was torn
 		// down underneath us.

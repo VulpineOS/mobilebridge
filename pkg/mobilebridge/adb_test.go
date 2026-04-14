@@ -95,16 +95,15 @@ type stubCall struct {
 func withStubRunner(t *testing.T, out string, err error) *[]stubCall {
 	t.Helper()
 	var calls []stubCall
-	orig := commandRunner
-	commandRunner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	swapCommandRunner(t, func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		calls = append(calls, stubCall{name: name, args: append([]string(nil), args...)})
 		return []byte(out), err
-	}
-	t.Cleanup(func() { commandRunner = orig })
+	})
 	return &calls
 }
 
 func TestListDevicesUsesRunner(t *testing.T) {
+	lockTestGlobals(t)
 	calls := withStubRunner(t, sampleDevicesOutput, nil)
 	devs, err := ListDevices(context.Background())
 	if err != nil {
@@ -122,6 +121,7 @@ func TestListDevicesUsesRunner(t *testing.T) {
 }
 
 func TestForwardArgs(t *testing.T) {
+	lockTestGlobals(t)
 	calls := withStubRunner(t, "", nil)
 	if err := Forward(context.Background(), "R58N", 9222, "chrome_devtools_remote"); err != nil {
 		t.Fatal(err)
@@ -142,6 +142,7 @@ func TestForwardEmptySerial(t *testing.T) {
 }
 
 func TestUnforwardArgs(t *testing.T) {
+	lockTestGlobals(t)
 	calls := withStubRunner(t, "", nil)
 	if err := Unforward(context.Background(), "R58N", 9222); err != nil {
 		t.Fatal(err)
@@ -153,6 +154,7 @@ func TestUnforwardArgs(t *testing.T) {
 }
 
 func TestChromeDevtoolsSocket(t *testing.T) {
+	lockTestGlobals(t)
 	withStubRunner(t, sampleProcNetUnixChrome, nil)
 	name, err := ChromeDevtoolsSocket(context.Background(), "R58N")
 	if err != nil {
@@ -164,6 +166,7 @@ func TestChromeDevtoolsSocket(t *testing.T) {
 }
 
 func TestChromeDevtoolsSocketError(t *testing.T) {
+	lockTestGlobals(t)
 	withStubRunner(t, "boom", errors.New("exit 1"))
 	if _, err := ChromeDevtoolsSocket(context.Background(), "R58N"); err == nil {
 		t.Error("expected error")
@@ -171,6 +174,7 @@ func TestChromeDevtoolsSocketError(t *testing.T) {
 }
 
 func TestChromeDevtoolsSocketNone(t *testing.T) {
+	lockTestGlobals(t)
 	withStubRunner(t, sampleProcNetUnixNone, nil)
 	if _, err := ChromeDevtoolsSocket(context.Background(), "R58N"); err == nil {
 		t.Error("expected error when no socket present")
@@ -178,6 +182,7 @@ func TestChromeDevtoolsSocketNone(t *testing.T) {
 }
 
 func TestChromeDevtoolsSocketInfoChrome(t *testing.T) {
+	lockTestGlobals(t)
 	withStubRunner(t, sampleProcNetUnixChrome, nil)
 	info, err := ChromeDevtoolsSocketInfo(context.Background(), "R58N")
 	if err != nil {
@@ -192,6 +197,7 @@ func TestChromeDevtoolsSocketInfoChrome(t *testing.T) {
 }
 
 func TestChromeDevtoolsSocketInfoWebView(t *testing.T) {
+	lockTestGlobals(t)
 	withStubRunner(t, sampleProcNetUnixWebviewOnly, nil)
 	info, err := ChromeDevtoolsSocketInfo(context.Background(), "R58N")
 	if err != nil {
@@ -208,9 +214,10 @@ func TestChromeDevtoolsSocketInfoWebView(t *testing.T) {
 // TestErrADBMissing_Wrapped verifies ListDevices wraps ErrADBMissing when
 // exec.LookPath("adb") fails, so callers can errors.Is-check the sentinel.
 func TestErrADBMissing_Wrapped(t *testing.T) {
-	origLookup := adbLookupFn
-	adbLookupFn = func(string) (string, error) { return "", errors.New("exec: \"adb\": executable file not found in $PATH") }
-	t.Cleanup(func() { adbLookupFn = origLookup })
+	lockTestGlobals(t)
+	swapADBLookupFn(t, func(string) (string, error) {
+		return "", errors.New("exec: \"adb\": executable file not found in $PATH")
+	})
 
 	_, err := ListDevices(context.Background())
 	if err == nil {
@@ -225,11 +232,10 @@ func TestErrADBMissing_Wrapped(t *testing.T) {
 // the canonical "device 'X' not found" stderr, and asserts Forward wraps
 // ErrDeviceNotFound.
 func TestErrDeviceNotFound_Wrapped(t *testing.T) {
-	orig := commandRunner
-	t.Cleanup(func() { commandRunner = orig })
-	commandRunner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	lockTestGlobals(t)
+	swapCommandRunner(t, func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		return []byte("error: device 'R58NFAKE' not found\n"), errors.New("exit status 1")
-	}
+	})
 
 	err := Forward(context.Background(), "R58NFAKE", 9222, "chrome_devtools_remote")
 	if err == nil {
@@ -244,9 +250,8 @@ func TestErrDeviceNotFound_Wrapped(t *testing.T) {
 // use errors.Is to match failure modes without parsing error strings.
 func TestSentinelErrors(t *testing.T) {
 	// ErrADBMissing: stub adbLookupFn so we don't need a real missing adb.
-	origLookup := adbLookupFn
-	adbLookupFn = func(string) (string, error) { return "", errors.New("exec: not found") }
-	t.Cleanup(func() { adbLookupFn = origLookup })
+	lockTestGlobals(t)
+	swapADBLookupFn(t, func(string) (string, error) { return "", errors.New("exec: not found") })
 
 	_, err := ListDevices(context.Background())
 	if err == nil {
@@ -257,7 +262,7 @@ func TestSentinelErrors(t *testing.T) {
 	}
 
 	// Restore lookup for the devtools socket test.
-	adbLookupFn = origLookup
+	swapADBLookupFn(t, func(string) (string, error) { return "/fake/adb", nil })
 
 	// ErrNoDevtoolsSocket: /proc/net/unix with no matching line.
 	withStubRunner(t, sampleProcNetUnixNone, nil)

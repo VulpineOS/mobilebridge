@@ -22,7 +22,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/PopcornDev1/mobilebridge/pkg/mobilebridge"
+	"github.com/VulpineOS/mobilebridge/pkg/mobilebridge"
 )
 
 func main() {

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 // Device describes a single Android device as reported by `adb devices -l`
@@ -34,6 +35,8 @@ var commandRunner = func(ctx context.Context, name string, args ...string) ([]by
 	return exec.CommandContext(ctx, name, args...).CombinedOutput()
 }
 
+var testOverrideMu sync.RWMutex
+
 // adbPath is the executable used for ADB calls. Tests may override it.
 var adbPath = "adb"
 
@@ -45,14 +48,22 @@ func runADB(ctx context.Context, args ...string) ([]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return commandRunner(ctx, adbPath, args...)
+	testOverrideMu.RLock()
+	runner := commandRunner
+	path := adbPath
+	testOverrideMu.RUnlock()
+	return runner(ctx, path, args...)
 }
 
 // ListDevices runs `adb devices -l` and parses the result. If the adb
 // executable isn't on PATH it returns an error wrapping ErrADBMissing so
 // callers can errors.Is-check the common operator mistake.
 func ListDevices(ctx context.Context) ([]Device, error) {
-	if _, lookErr := adbLookupFn(adbPath); lookErr != nil {
+	testOverrideMu.RLock()
+	lookup := adbLookupFn
+	path := adbPath
+	testOverrideMu.RUnlock()
+	if _, lookErr := lookup(path); lookErr != nil {
 		return nil, fmt.Errorf("%w: %v", ErrADBMissing, lookErr)
 	}
 	out, err := runADB(ctx, "devices", "-l")
