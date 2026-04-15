@@ -21,6 +21,8 @@ It is designed to be useful both as:
 
 For release notes, see [CHANGELOG.md](CHANGELOG.md). For the release
 checklist used for tags, see [RELEASING.md](RELEASING.md).
+For host-process and Vulpine integration patterns, see
+[docs/integration.md](docs/integration.md).
 
 ## What it does
 
@@ -259,6 +261,9 @@ defer session.Close()
 
 This keeps the package usable both as a local CLI and as a bridge
 component inside larger device-farm or agent systems.
+
+For the VulpineOS extension-adapter pattern and the recommended hosted
+API worker shape, see [docs/integration.md](docs/integration.md).
 
 ## Sentinel errors
 
