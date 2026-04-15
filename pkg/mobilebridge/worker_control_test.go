@@ -301,6 +301,28 @@ func TestWorkerControlServer_RecordingFlow(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("download status = %d", resp.StatusCode)
 	}
+
+	req, err := http.NewRequest(http.MethodDelete, "http://"+server.ListenAddr()+"/recordings/"+started.RecordingID, nil)
+	if err != nil {
+		t.Fatalf("delete recording request: %v", err)
+	}
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("delete recording: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("delete status = %d", resp.StatusCode)
+	}
+
+	resp, err = http.Get("http://" + server.ListenAddr() + "/recordings/" + started.RecordingID + "/content")
+	if err != nil {
+		t.Fatalf("download deleted recording: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("deleted download status = %d", resp.StatusCode)
+	}
 }
 
 func TestWorkerControlServer_AllowsSecondRecordingAfterStop(t *testing.T) {

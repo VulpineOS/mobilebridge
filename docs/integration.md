@@ -158,6 +158,7 @@ Current endpoints:
 - `POST /sessions/{id}/recording/start`
 - `POST /sessions/{id}/recording/stop`
 - `GET /recordings/{id}/content`
+- `DELETE /recordings/{id}`
 - `GET /health`
 
 This lets a control plane such as `vulpine-api` keep session leases,
@@ -177,11 +178,11 @@ heartbeat includes current device inventory plus worker load fields such
 as `active_sessions`, `queue_depth`, `max_sessions`, `failure_rate`, and
 `last_error`.
 
-When `--worker-control-token` is set, the worker-control mutation routes
-and recording downloads require `Authorization: Bearer ...` from the
-control plane. That keeps attach, release, target creation, recording
-control, and artifact fetches off unauthenticated private-network
-surfaces.
+When `--worker-control-token` is set, the worker-control mutation routes,
+recording downloads, and recording deletes require `Authorization:
+Bearer ...` from the control plane. That keeps attach, release, target
+creation, recording control, and artifact cleanup off unauthenticated
+private-network surfaces.
 
 ## Failure handling
 

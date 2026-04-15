@@ -459,18 +459,38 @@ func (s *WorkerControlServer) handleStopRecording(w http.ResponseWriter, r *http
 }
 
 func (s *WorkerControlServer) handleRecording(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet && r.Method != http.MethodDelete {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/recordings/")
-	if !strings.HasSuffix(path, "/content") {
-		http.NotFound(w, r)
-		return
-	}
 	if !s.authorized(r) {
 		s.recordRequest(errors.New("unauthorized worker control request"))
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	if r.Method == http.MethodDelete {
+		recordingID := strings.TrimSuffix(path, "/")
+		if recordingID == "" || strings.Contains(recordingID, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		if s.getRecording(recordingID) == nil {
+			s.recordRequest(errors.New("recording not found"))
+			http.NotFound(w, r)
+			return
+		}
+		if err := s.cleanupRecording(recordingID); err != nil {
+			s.recordRequest(err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		s.recordRequest(nil)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+		return
+	}
+	if !strings.HasSuffix(path, "/content") {
+		http.NotFound(w, r)
 		return
 	}
 	recordingID := strings.TrimSuffix(path, "/content")
@@ -520,6 +540,11 @@ func (s *WorkerControlServer) cleanupRecording(id string) error {
 	s.mu.Lock()
 	recording := s.recordings[id]
 	delete(s.recordings, id)
+	if recording != nil {
+		if session := s.sessions[recording.sessionID]; session != nil && session.recordingID == id {
+			session.recordingID = ""
+		}
+	}
 	s.mu.Unlock()
 	if recording == nil {
 		return nil

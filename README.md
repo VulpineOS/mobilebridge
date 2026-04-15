@@ -311,6 +311,7 @@ That server currently exposes:
 - `POST /sessions/{id}/recording/start`
 - `POST /sessions/{id}/recording/stop`
 - `GET /recordings/{id}/content`
+- `DELETE /recordings/{id}`
 - `GET /health`
 
 The intended caller is a higher-level control plane such as `vulpine-api`.
