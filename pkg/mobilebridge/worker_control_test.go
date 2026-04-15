@@ -143,3 +143,71 @@ func TestWorkerControlServer_RemovesClosedSessions(t *testing.T) {
 	}
 	t.Fatal("session was not cleaned up after Done closed")
 }
+
+func TestWorkerControlServer_EnforcesMaxSessions(t *testing.T) {
+	server := NewWorkerControlServer("127.0.0.1:0")
+	server.SetMaxSessions(1)
+	server.startAttached = func(context.Context, string, string) (workerAttachedSession, error) {
+		return &fakeWorkerAttachedSession{
+			browserURL: "http://127.0.0.1:9222",
+			done:       make(chan struct{}),
+		}, nil
+	}
+	server.newSessionID = func() string { return "mbw_test" }
+	if err := server.Start(); err != nil {
+		t.Fatalf("start worker control: %v", err)
+	}
+	defer server.Stop()
+
+	resp, err := http.Post("http://"+server.ListenAddr()+"/sessions", "application/json", bytes.NewBufferString(`{"device_id":"android-1"}`))
+	if err != nil {
+		t.Fatalf("attach session: %v", err)
+	}
+	resp.Body.Close()
+
+	resp, err = http.Post("http://"+server.ListenAddr()+"/sessions", "application/json", bytes.NewBufferString(`{"device_id":"android-2"}`))
+	if err != nil {
+		t.Fatalf("attach second session: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+}
+
+func TestWorkerControlServer_Snapshot(t *testing.T) {
+	server := NewWorkerControlServer("127.0.0.1:0")
+	server.SetMaxSessions(3)
+	server.startAttached = func(context.Context, string, string) (workerAttachedSession, error) {
+		return &fakeWorkerAttachedSession{
+			browserURL: "http://127.0.0.1:9222",
+			done:       make(chan struct{}),
+		}, nil
+	}
+	server.newSessionID = func() string { return "mbw_test" }
+	server.listDevices = func(context.Context) ([]Device, error) {
+		return []Device{{Serial: "android-1", State: "device", Model: "Pixel 9", AndroidVersion: "14"}}, nil
+	}
+	server.enrichDevice = func(context.Context, *Device) error { return nil }
+	server.socketInfo = func(context.Context, string) (DevtoolsSocket, error) {
+		return DevtoolsSocket{Name: "chrome_devtools_remote", Kind: SocketKindChrome}, nil
+	}
+	if err := server.Start(); err != nil {
+		t.Fatalf("start worker control: %v", err)
+	}
+	defer server.Stop()
+
+	resp, err := http.Post("http://"+server.ListenAddr()+"/sessions", "application/json", bytes.NewBufferString(`{"device_id":"android-1"}`))
+	if err != nil {
+		t.Fatalf("attach session: %v", err)
+	}
+	resp.Body.Close()
+
+	snapshot := server.Snapshot(context.Background(), "worker-1", "farm-a", "http://worker-a.internal")
+	if !snapshot.Healthy || snapshot.ActiveSessions != 1 || snapshot.MaxSessions != 3 {
+		t.Fatalf("snapshot = %#v", snapshot)
+	}
+	if len(snapshot.Devices) != 1 || !snapshot.Devices[0].Inspectable {
+		t.Fatalf("snapshot devices = %#v", snapshot.Devices)
+	}
+}

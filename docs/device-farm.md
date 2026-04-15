@@ -90,6 +90,11 @@ Suggested fields:
 - `hostname`
 - `advertise_addr`
 - `device_count`
+- `active_sessions`
+- `queue_depth`
+- `max_sessions`
+- `failure_rate`
+- `last_error`
 - `healthy`
 - `last_heartbeat_at`
 

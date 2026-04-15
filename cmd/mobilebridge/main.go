@@ -27,16 +27,23 @@ import (
 
 func main() {
 	var (
-		device        = flag.String("device", "", "device serial (auto-pick if empty and exactly one is attached)")
-		port          = flag.Int("port", 9222, "local TCP port for the CDP server")
-		list          = flag.Bool("list", false, "list attached devices and exit")
-		watch         = flag.Bool("watch", false, "continuously watch for device hotplug and log added/removed devices")
-		health        = flag.Bool("health", false, "print device + connection state and exit")
-		autoRestart   = flag.Bool("auto-restart", false, "if the upstream drops, auto-restart the bridge instead of exiting")
-		devices       = flag.Bool("devices", false, "print enriched device list (Android version, SDK, RAM, battery) and exit")
-		screenRecord  = flag.String("screenrecord", "", "start `adb screenrecord` on server start and pull to this path on shutdown")
-		logcat        = flag.Bool("logcat", false, "after bridge start, print `adb logcat -d` filtered to Chrome processes")
-		workerControl = flag.String("worker-control", "", "run hosted worker control server on this addr instead of a single-device bridge")
+		device             = flag.String("device", "", "device serial (auto-pick if empty and exactly one is attached)")
+		port               = flag.Int("port", 9222, "local TCP port for the CDP server")
+		list               = flag.Bool("list", false, "list attached devices and exit")
+		watch              = flag.Bool("watch", false, "continuously watch for device hotplug and log added/removed devices")
+		health             = flag.Bool("health", false, "print device + connection state and exit")
+		autoRestart        = flag.Bool("auto-restart", false, "if the upstream drops, auto-restart the bridge instead of exiting")
+		devices            = flag.Bool("devices", false, "print enriched device list (Android version, SDK, RAM, battery) and exit")
+		screenRecord       = flag.String("screenrecord", "", "start `adb screenrecord` on server start and pull to this path on shutdown")
+		logcat             = flag.Bool("logcat", false, "after bridge start, print `adb logcat -d` filtered to Chrome processes")
+		workerControl      = flag.String("worker-control", "", "run hosted worker control server on this addr instead of a single-device bridge")
+		workerHeartbeatURL = flag.String("worker-heartbeat-url", "", "POST heartbeat payloads to this vulpine-api /v1/mobile/workers/heartbeat endpoint")
+		workerID           = flag.String("worker-id", "", "stable worker id for hosted worker-control mode")
+		workerToken        = flag.String("worker-token", "", "bearer token for hosted worker heartbeat requests")
+		workerAdvertiseURL = flag.String("worker-advertise-url", "", "public or private URL that vulpine-api should use to reach this worker-control server")
+		workerHostname     = flag.String("worker-hostname", "", "override hostname reported in worker heartbeats")
+		workerInterval     = flag.Duration("worker-heartbeat-interval", 15*time.Second, "interval between hosted worker heartbeats")
+		workerMaxSessions  = flag.Int("worker-max-sessions", 0, "maximum attached sessions this worker-control server should allow (0 = unlimited)")
 	)
 	flag.Parse()
 
@@ -62,7 +69,15 @@ func main() {
 		}
 		return
 	case *workerControl != "":
-		if err := runWorkerControl(*workerControl); err != nil {
+		if err := runWorkerControl(*workerControl, workerControlOptions{
+			heartbeatURL: *workerHeartbeatURL,
+			workerID:     *workerID,
+			workerToken:  *workerToken,
+			advertiseURL: *workerAdvertiseURL,
+			hostname:     *workerHostname,
+			interval:     *workerInterval,
+			maxSessions:  *workerMaxSessions,
+		}); err != nil {
 			log.Fatalf("worker control: %v", err)
 		}
 		return
@@ -143,17 +158,52 @@ func runBridge(device string, port int, autoRestart bool, screenRecord string, l
 	}
 }
 
-func runWorkerControl(addr string) error {
+type workerControlOptions struct {
+	heartbeatURL string
+	workerID     string
+	workerToken  string
+	advertiseURL string
+	hostname     string
+	interval     time.Duration
+	maxSessions  int
+}
+
+func runWorkerControl(addr string, opts workerControlOptions) error {
 	server := mobilebridge.NewWorkerControlServer(addr)
+	server.SetMaxSessions(opts.maxSessions)
 	if err := server.Start(); err != nil {
 		return err
 	}
 	defer server.Stop()
 
 	log.Printf("mobilebridge worker control listening on http://%s", addr)
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-	<-sigCh
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	if opts.heartbeatURL != "" {
+		if opts.workerID == "" {
+			return fmt.Errorf("worker id is required when worker-heartbeat-url is set")
+		}
+		advertiseURL := opts.advertiseURL
+		if advertiseURL == "" {
+			advertiseURL = "http://" + server.ListenAddr()
+		}
+		publisher := mobilebridge.NewWorkerHeartbeatPublisher(
+			server,
+			opts.heartbeatURL,
+			opts.workerToken,
+			opts.workerID,
+			opts.hostname,
+			advertiseURL,
+			opts.interval,
+		)
+		go func() {
+			if err := publisher.Run(ctx); err != nil {
+				log.Printf("worker heartbeat stopped: %v", err)
+			}
+		}()
+	}
+	<-ctx.Done()
 	return nil
 }
 

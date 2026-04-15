@@ -161,6 +161,18 @@ This lets a control plane such as `vulpine-api` keep session leases,
 tenant auth, and placement logic in one place while the worker host owns
 the actual ADB attach and local CDP bridge lifecycle.
 
+When the worker also receives:
+
+- `--worker-heartbeat-url`
+- `--worker-id`
+- `--worker-token`
+- `--worker-advertise-url`
+
+it can self-register directly with the control plane. The published
+heartbeat includes current device inventory plus worker load fields such
+as `active_sessions`, `queue_depth`, `max_sessions`, `failure_rate`, and
+`last_error`.
+
 ## Failure handling
 
 When embedding `mobilebridge`, check these cases explicitly:

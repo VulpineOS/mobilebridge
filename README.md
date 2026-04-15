@@ -113,6 +113,17 @@ Run the hosted worker-control server for device-farm style allocation:
 mobilebridge --worker-control 127.0.0.1:7788
 ```
 
+Run the hosted worker-control server with self-registration heartbeats:
+
+```
+mobilebridge \
+  --worker-control 127.0.0.1:7788 \
+  --worker-id worker-auckland-1 \
+  --worker-advertise-url http://10.0.0.10:7788 \
+  --worker-heartbeat-url https://api.example.com/v1/mobile/workers/heartbeat \
+  --worker-token $MOBILE_WORKER_TOKEN
+```
+
 ## CLI flags
 
 | Flag             | Description                                                       |
@@ -127,6 +138,13 @@ mobilebridge --worker-control 127.0.0.1:7788
 | `--screenrecord` | Start `adb screenrecord` on server start and pull the MP4 to this path on shutdown. |
 | `--logcat`       | After bridge start, dump `adb logcat -d` filtered to Chrome/WebView tags. |
 | `--worker-control` | Run the hosted worker control server for attach, release, and new-target actions instead of a single-device bridge. |
+| `--worker-heartbeat-url` | POST hosted worker heartbeats to a Vulpine API control plane endpoint. |
+| `--worker-id` | Stable worker identifier used in hosted worker heartbeats. |
+| `--worker-token` | Bearer token sent with hosted worker heartbeat requests. |
+| `--worker-advertise-url` | Control-plane-reachable worker-control URL advertised in hosted heartbeats. |
+| `--worker-hostname` | Override the hostname reported in hosted worker heartbeats. |
+| `--worker-heartbeat-interval` | Interval between hosted worker heartbeats (default `15s`). |
+| `--worker-max-sessions` | Maximum attached sessions allowed in worker-control mode (default unlimited). |
 
 ## Touch gestures
 
@@ -292,6 +310,19 @@ That server currently exposes:
 
 The intended caller is a higher-level control plane such as `vulpine-api`.
 It assumes trusted internal callers on the worker host or private network.
+
+When `--worker-heartbeat-url` is configured, the same worker process will
+also self-register with the control plane and publish:
+
+- current device inventory
+- `active_sessions`
+- `queue_depth`
+- `max_sessions`
+- `failure_rate`
+- `last_error`
+
+That keeps hosted worker registration and load reporting inside one
+process instead of requiring a separate sidecar.
 
 ## Sentinel errors
 
