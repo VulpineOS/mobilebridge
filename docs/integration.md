@@ -3,6 +3,9 @@
 This document shows the intended host-process integration patterns for
 `mobilebridge`.
 
+For the hosted Android fleet model built on top of these primitives, see
+[device-farm.md](device-farm.md).
+
 ## What the package returns
 
 The core helper is `StartAttachedServer`:

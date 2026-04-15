@@ -44,7 +44,15 @@ This section captures cross-session preferences. Treat them as binding unless th
 
 - Senior C++ browser engine developer (Firefox internals, XPCOM, accessibility tree, DOM)
 - Dev machine: MacBook M1 Pro with artifact builds enabled
-- GitHub: `PopcornDev1`
+- GitHub: founder of `VulpineOS`
+
+### Public docs surface
+
+Keep these docs current as the public integration story evolves:
+
+- `README.md`
+- `docs/integration.md`
+- `docs/device-farm.md`
 
 ### GitHub rules
 

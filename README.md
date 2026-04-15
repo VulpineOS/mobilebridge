@@ -23,6 +23,8 @@ For release notes, see [CHANGELOG.md](CHANGELOG.md). For the release
 checklist used for tags, see [RELEASING.md](RELEASING.md).
 For host-process and Vulpine integration patterns, see
 [docs/integration.md](docs/integration.md).
+For the hosted Android device-farm and session-pool model, see
+[docs/device-farm.md](docs/device-farm.md).
 
 ## What it does
 

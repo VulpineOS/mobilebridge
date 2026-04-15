@@ -33,3 +33,11 @@ When running unattended:
 ## Dependencies
 
 Prefer the standard library. The only third-party dependency right now is `github.com/gorilla/websocket`. Add new dependencies only with good reason.
+
+## Public docs surface
+
+Keep these docs current as the public integration story evolves:
+
+- `README.md`
+- `docs/integration.md`
+- `docs/device-farm.md`
