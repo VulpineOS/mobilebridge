@@ -101,7 +101,13 @@ func TestJsonListRewrite(t *testing.T) {
 	}
 
 	p := &Proxy{localPort: upPort}
-	s := NewServer("fake-serial", "127.0.0.1:9222")
+	serverPort, err := freeTCPPort()
+	if err != nil {
+		t.Fatalf("free server port: %v", err)
+	}
+	serverAddr := fmt.Sprintf("127.0.0.1:%d", serverPort)
+	baseURL := "http://" + serverAddr
+	s := NewServer("fake-serial", serverAddr)
 	if err := s.Start(); err != nil {
 		t.Fatalf("start server: %v", err)
 	}
@@ -110,7 +116,7 @@ func TestJsonListRewrite(t *testing.T) {
 		t.Fatalf("run with proxy: %v", err)
 	}
 
-	resp, err := http.Get("http://127.0.0.1:9222/json/list")
+	resp, err := http.Get(baseURL + "/json/list")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -125,11 +131,11 @@ func TestJsonListRewrite(t *testing.T) {
 		t.Fatalf("want 1 entry, got %d", len(entries))
 	}
 	ws, _ := entries[0]["webSocketDebuggerUrl"].(string)
-	if ws != "ws://127.0.0.1:9222/devtools/page/ABC123" {
+	if ws != fmt.Sprintf("ws://%s/devtools/page/ABC123", serverAddr) {
 		t.Errorf("webSocketDebuggerUrl not rewritten: %q", ws)
 	}
 	front, _ := entries[0]["devtoolsFrontendUrl"].(string)
-	if !strings.Contains(front, "ws=127.0.0.1:9222/devtools/page/ABC123") {
+	if !strings.Contains(front, "ws="+serverAddr+"/devtools/page/ABC123") {
 		t.Errorf("devtoolsFrontendUrl not rewritten: %q", front)
 	}
 }
@@ -226,7 +232,12 @@ func TestJsonListCache_HitsWithin500ms(t *testing.T) {
 		t.Fatalf("parse upstream port: %v", err)
 	}
 	p := &Proxy{localPort: upPort}
-	s := NewServer("fake-serial", "127.0.0.1:9223")
+	serverPort, err := freeTCPPort()
+	if err != nil {
+		t.Fatalf("free server port: %v", err)
+	}
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", serverPort)
+	s := NewServer("fake-serial", strings.TrimPrefix(baseURL, "http://"))
 	if err := s.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -237,7 +248,7 @@ func TestJsonListCache_HitsWithin500ms(t *testing.T) {
 
 	// Hammer /json/list 20 times within the TTL window.
 	for i := 0; i < 20; i++ {
-		resp, err := http.Get("http://127.0.0.1:9223/json/list")
+		resp, err := http.Get(baseURL + "/json/list")
 		if err != nil {
 			t.Fatalf("get %d: %v", i, err)
 		}
@@ -250,7 +261,7 @@ func TestJsonListCache_HitsWithin500ms(t *testing.T) {
 
 	// After the TTL, a fresh request should hit upstream again.
 	time.Sleep(jsonListCacheTTL + 50*time.Millisecond)
-	resp, err := http.Get("http://127.0.0.1:9223/json/list")
+	resp, err := http.Get(baseURL + "/json/list")
 	if err != nil {
 		t.Fatalf("get after ttl: %v", err)
 	}
@@ -278,7 +289,12 @@ func TestJsonListCache_DoesNotCacheErrors(t *testing.T) {
 		t.Fatalf("parse upstream port: %v", err)
 	}
 	p := &Proxy{localPort: upPort}
-	s := NewServer("fake-serial", "127.0.0.1:9225")
+	serverPort, err := freeTCPPort()
+	if err != nil {
+		t.Fatalf("free server port: %v", err)
+	}
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", serverPort)
+	s := NewServer("fake-serial", strings.TrimPrefix(baseURL, "http://"))
 	if err := s.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -289,7 +305,7 @@ func TestJsonListCache_DoesNotCacheErrors(t *testing.T) {
 
 	// Three hits; each should miss cache because 503 is not cacheable.
 	for i := 0; i < 3; i++ {
-		resp, err := http.Get("http://127.0.0.1:9225/json/list")
+		resp, err := http.Get(baseURL + "/json/list")
 		if err != nil {
 			t.Fatalf("get %d: %v", i, err)
 		}
@@ -328,7 +344,12 @@ func TestJsonListCache_InvalidatedOnDeviceChange(t *testing.T) {
 		t.Fatalf("parse upstream port: %v", err)
 	}
 	p := &Proxy{localPort: upPort}
-	s := NewServer("fake-serial", "127.0.0.1:9224")
+	serverPort, err := freeTCPPort()
+	if err != nil {
+		t.Fatalf("free server port: %v", err)
+	}
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", serverPort)
+	s := NewServer("fake-serial", strings.TrimPrefix(baseURL, "http://"))
 	if err := s.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -338,7 +359,7 @@ func TestJsonListCache_InvalidatedOnDeviceChange(t *testing.T) {
 	}
 
 	// Populate the cache.
-	resp, err := http.Get("http://127.0.0.1:9224/json/list")
+	resp, err := http.Get(baseURL + "/json/list")
 	if err != nil {
 		t.Fatalf("get 1: %v", err)
 	}
@@ -349,7 +370,7 @@ func TestJsonListCache_InvalidatedOnDeviceChange(t *testing.T) {
 	}
 
 	// A follow-up within the TTL should hit the cache (no new upstream hit).
-	resp, err = http.Get("http://127.0.0.1:9224/json/list")
+	resp, err = http.Get(baseURL + "/json/list")
 	if err != nil {
 		t.Fatalf("get 2: %v", err)
 	}
@@ -364,7 +385,7 @@ func TestJsonListCache_InvalidatedOnDeviceChange(t *testing.T) {
 	if err := s.RunWithProxy(p2); err != nil {
 		t.Fatalf("re-wire: %v", err)
 	}
-	resp, err = http.Get("http://127.0.0.1:9224/json/list")
+	resp, err = http.Get(baseURL + "/json/list")
 	if err != nil {
 		t.Fatalf("get 3: %v", err)
 	}
@@ -377,7 +398,7 @@ func TestJsonListCache_InvalidatedOnDeviceChange(t *testing.T) {
 	// Direct invalidateListCache call (as WatchDevices would do) forces
 	// another miss.
 	s.invalidateListCache()
-	resp, err = http.Get("http://127.0.0.1:9224/json/list")
+	resp, err = http.Get(baseURL + "/json/list")
 	if err != nil {
 		t.Fatalf("get 4: %v", err)
 	}
